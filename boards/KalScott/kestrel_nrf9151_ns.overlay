@@ -10,20 +10,7 @@
     zephyr,flash-buf-max-size = <64>;
 };
 
-
-
-
-
-
-&pmic_main {
-	status = "okay";
-};
-
-&gpios_pmic {
-	status = "okay";
-};
-
-&flash_ext {
+&ext_flash {
     status = "okay";
 };
 

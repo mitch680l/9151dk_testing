@@ -3,13 +3,12 @@
 		zephyr,console = &uart1;
 		zephyr,shell-uart = &uart1;
 		zephyr,uart-mcumgr = &uart1;	
-		nordic,pm-ext-flash = &gd25wb256;
 	};
 };
 
 
 &gd25wb256 {
-	status = "okay";
+	status = "disabled";
 };
 
 &uart0 {
@@ -21,6 +20,9 @@
 	pinctrl-names = "default", "sleep";
 };
 
+&spi3 {
+	status = "disabled";
+};
 &uart1 {
 	status = "okay";
 	current-speed = <115200>;
@@ -72,3 +74,4 @@
 		};
 	};
 };
+
