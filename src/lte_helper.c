@@ -101,7 +101,7 @@ int modem_configure(void)
         return err;
     }
    
-    provision_all_tls_credentials();
+    //provision_all_tls_credentials();
 
     lte_lc_system_mode_set(LTE_LC_SYSTEM_MODE_LTEM, LTE_LC_SYSTEM_MODE_PREFER_AUTO);
    

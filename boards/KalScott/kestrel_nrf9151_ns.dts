@@ -14,9 +14,32 @@
 		zephyr,code-partition = &slot0_ns_partition;
 
 	};
+
+	zephyr,user {
+		ipc2-gpios = <&gpio0 17 0>;
+		ip3-gpios = <&gpio0 18 0>;
+		ipc4-gpios = <&gpio0 19 0>;
+		sim_det-gpios = <&gpio0 24 0>;
+		sim_select-gpios = <&gpio0 25 0>;
+	};
+};
+
+/* UART1 completely removed for GNSS I2C implementation */
+
+&power {
+	status = "okay";
+};
+
+&ipc {
+	status = "okay";
+};
+
+&gpiote {
+	status = "okay";
 };
 
 
-&uart1 {
+
+&systick {
 	status = "disabled";
 };

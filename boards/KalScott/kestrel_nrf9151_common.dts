@@ -4,19 +4,47 @@
  */
 
 #include "kestrel_nrf9151_common-pinctrl.dtsi"
-arduino_spi: &spi3 {
+#include "kestrel_common.dtsi"
+
+&spi3 {
 	compatible = "nordic,nrf-spim";
-	status = "okay";
-	cs-gpios = <&arduino_header 16 GPIO_ACTIVE_LOW>, /* D10 */
-		   <&gpio0 20 GPIO_ACTIVE_LOW>;
+	status = "disabled";
+
 	pinctrl-0 = <&spi3_default>;
 	pinctrl-1 = <&spi3_sleep>;
 	pinctrl-names = "default", "sleep";
 
-	ext_flash: gd25wb256e3ir@1 {
+
+	// flash_ext: s25fl256s@0 {
+	// 	compatible = "jedec,spi-nor";
+	// 	status = "disabled";
+	// 	reg = <0>;
+	// 	spi-max-frequency = <8000000>;
+	// 	size = <268435456>;
+	// 	jedec-id = [01 02 19];
+	// 	use-4b-addr-opcodes;
+	// };
+	
+	// flash_ext: GD25LE255E@0 {
+	// 	compatible = "jedec,spi-nor";
+	// 	status = "disabled";
+	// 	reg = <0>;
+	// 	spi-max-frequency = <8000000>;
+	// 	size = <268435456>;
+	// 	has-dpd;
+	// 	t-enter-dpd = <3000>;
+	// 	t-exit-dpd = <20000>;
+	// 	sfdp-bfp = [e5 20 f3 ff  ff ff ff 0f  44 eb 08 6b  08 3b 42 bb
+	// 		    fe ff ff ff  ff ff 00 ff  ff ff 42 eb  0c 20 0f 52
+	// 		    10 d8 00 ff  d4 31 a5 fe  84 df 14 4f  ec 62 16 33
+	// 		    7a 75 7a 75  04 b3 d5 5c  19 06 14 00  08 50 00 01];
+	// 	jedec-id = [c8 60 19];
+	// };
+
+	flash_ext: gd25wb256e3ir@0 {
 		compatible = "jedec,spi-nor";
 		status = "disabled";
-		reg = <1>;
+		reg = <0>;
 		spi-max-frequency = <8000000>;
 		size = <268435456>;
 		has-dpd;
@@ -30,136 +58,59 @@ arduino_spi: &spi3 {
 			];
 		jedec-id = [c8 65 19];
 	};
+
+	
+	imu: icm42688@2 {
+        compatible = "invensense,icm42688";
+        reg = <2>;                       
+        spi-max-frequency = <8000000>;
+        status = "disabled";
+        int-gpios = <&gpio0 26 GPIO_ACTIVE_HIGH>;
+		vin-supply = <&ldsw_sensors>;
+
+		accel-pwr-mode = <ICM42688_DT_ACCEL_LN>;
+		accel-fs = <ICM42688_DT_ACCEL_FS_16>;
+		accel-odr = <ICM42688_DT_ACCEL_ODR_2000>;
+		gyro-pwr-mode= <ICM42688_DT_GYRO_LN>;
+		gyro-fs = <ICM42688_DT_GYRO_FS_2000>;
+		gyro-odr = <ICM42688_DT_GYRO_ODR_2000>;
+    };
+
 };
 / {
 	model = "Kalscott Kestrel nRF9151";
 	compatible = "Kalscott,kestrel-nrf9151";
 
+	//  i2c_bb0: i2c {
+    //     compatible = "gpio-i2c";
+    //     status = "okay";
+    //     scl-gpios = <&gpio0 9 (GPIO_OPEN_DRAIN | GPIO_PULL_UP)>;
+    //     sda-gpios = <&gpio0 8 (GPIO_OPEN_DRAIN | GPIO_PULL_UP)>;
+    //     clock-frequency = <I2C_BITRATE_STANDARD>;
+    //     label = "I2C_BB0";
+
+    //     #address-cells = <1>;
+    //     #size-cells = <0>;
+    // };
+
 	chosen {
-		zephyr,console = &uart1;
-		zephyr,shell-uart = &uart1;
+		zephyr,console = &uart0;
+		zephyr,shell-uart = &uart0;
 		zephyr,uart-mcumgr = &uart1;
-		nordic,pm-ext-flash = &ext_flash;
-	};
-
-	leds {
-		compatible = "gpio-leds";
-		led0: led_0 {
-			gpios = <&gpio0 0 GPIO_ACTIVE_HIGH>;
-			label = "Green LED 1";
-		};
-		led1: led_1 {
-			gpios = <&gpio0 1 GPIO_ACTIVE_HIGH>;
-			label = "Green LED 2";
-		};
-		led2: led_2 {
-			gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
-			label = "Green LED 3";
-		};
-		led3: led_3 {
-			gpios = <&gpio0 5 GPIO_ACTIVE_HIGH>;
-			label = "Green LED 4";
-		};
-	};
-
-	pwmleds {
-		compatible = "pwm-leds";
-		pwm_led0: pwm_led_0 {
-			pwms = <&pwm0 0 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
-		};
+		nordic,pm-ext-flash = &flash_ext;
 	};
 
 	buttons {
 		compatible = "gpio-keys";
-		button0: button_0 {
-			gpios = <&gpio0 8 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
-			label = "Push button 1";
-			zephyr,code = <INPUT_KEY_0>;
-		};
-		button1: button_1 {
-			gpios = <&gpio0 9 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
-			label = "Push button 2";
-			zephyr,code = <INPUT_KEY_1>;
-		};
-		button2: button_2 {
-			gpios = <&gpio0 18 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
-			label = "Push button 3";
-			zephyr,code = <INPUT_KEY_2>;
-		};
-		button3: button_3 {
-			gpios = <&gpio0 19 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
-			label = "Push button 4";
-			zephyr,code = <INPUT_KEY_3>;
+		ipc1: button_0 {
+			gpios = <&gpio0 16 (GPIO_ACTIVE_HIGH)>;
 		};
 	};
-
-
-	
-
-	nrf5340_reset: gpio-reset {
-		compatible = "nordic,nrf9151dk-nrf5340-reset";
-		status = "disabled";
-		gpios = <&gpio0 21 GPIO_ACTIVE_LOW>;
-	};
-
-	arduino_header: connector {
-		compatible = "arduino-header-r3";
-		#gpio-cells = <2>;
-		gpio-map-mask = <0xffffffff 0xffffffc0>;
-		gpio-map-pass-thru = <0 0x3f>;
-		gpio-map = <0 0 &gpio0 14 0>,	/* A0 */
-			   <1 0 &gpio0 15 0>,	/* A1 */
-			   <2 0 &gpio0 16 0>,	/* A2 */
-			   <3 0 &gpio0 17 0>,	/* A3 */
-			   <4 0 &gpio0 18 0>,	/* A4 */
-			   <5 0 &gpio0 19 0>,	/* A5 */
-			   <6 0 &gpio0 0 0>,	/* D0 */
-			   <7 0 &gpio0 1 0>,	/* D1 */
-			   <8 0 &gpio0 2 0>,	/* D2 */
-			   <9 0 &gpio0 3 0>,	/* D3 */
-			   <10 0 &gpio0 4 0>,	/* D4 */
-			   <11 0 &gpio0 5 0>,	/* D5 */
-			   <12 0 &gpio0 6 0>,	/* D6 */
-			   <13 0 &gpio0 7 0>,	/* D7 */
-			   <14 0 &gpio0 8 0>,	/* D8 */
-			   <15 0 &gpio0 9 0>,	/* D9 */
-			   <16 0 &gpio0 10 0>,	/* D10 */
-			   <17 0 &gpio0 11 0>,	/* D11 */
-			   <18 0 &gpio0 12 0>,	/* D12 */
-			   <19 0 &gpio0 13 0>,	/* D13 */
-			   <20 0 &gpio0 30 0>,	/* D14 */
-			   <21 0 &gpio0 31 0>;	/* D15 */
-	};
-
-	arduino_adc: analog-connector {
-		compatible = "arduino,uno-adc";
-		#io-channel-cells = <1>;
-		io-channel-map = <0 &adc 1>,	/* A0 = P0.14 = AIN1 */
-				 <1 &adc 2>,	/* A1 = P0.15 = AIN2 */
-				 <2 &adc 3>,	/* A2 = P0.16 = AIN3 */
-				 <3 &adc 4>,	/* A3 = P0.17 = AIN4 */
-				 <4 &adc 5>,	/* A4 = P0.18 = AIN5 */
-				 <5 &adc 6>;	/* A5 = P0.19 = AIN6 */
-	};
-
-
-
 
 	aliases {
-		spi-flash0 = &ext_flash;
-		led0 = &led0;
-		led1 = &led1;
-		led2 = &led2;
-		led3 = &led3;
-		pwm-led0 = &pwm_led0;
-		sw0 = &button0;
-		sw1 = &button1;
-		sw2 = &button2;
-		sw3 = &button3;
-		bootloader-led0 = &led0;
-		mcuboot-button0 = &button0;
-		mcuboot-led0 = &led0;
-		watchdog0 = &wdt0;
+		sw0 = &ipc1;                
+		mcuboot-button0 = &ipc1;     
+		spi-flash0 = &flash_ext;
 	};
 };
 
@@ -171,53 +122,96 @@ arduino_spi: &spi3 {
 	status = "okay";
 };
 
+
+
 &gpio0 {
 	status = "okay";
+	/* Use PORT event rather than GPIOTE IN event, to save power */
+	sense-edge-mask = <0xffffffff>;
+	/* Load switch controlling 3.3V supply and I/O voltage for external boards */
+	/* Disabled for standalone nRF9151 - re-enable if you have expansion connectors that need power switching
+	exp_board_enable: exp_board_enable {
+		gpio-hog;
+		output-low;
+		gpios = <3 GPIO_ACTIVE_HIGH>;
+	};
+	*/
 };
 
-&uart0 {
-	status = "okay";
-	current-speed = <115200>;
-	pinctrl-0 = <&uart0_default>;
-	pinctrl-1 = <&uart0_sleep>;
-	pinctrl-names = "default", "sleep";
+/* PWM0 disabled - RGB LEDs not present on standalone design */
+&pwm0 {
+	status = "disabled";
 };
 
-arduino_serial: &uart1 {
+&pmic_main {
+	
+};
+
+
+&flash_ext {
 	status = "okay";
+};
+
+
+&i2c2 {
+	status = "okay";
+	
+};
+&spi3 {
+	status = "okay";
+	cs-gpios = 
+		<&gpio0 0 GPIO_ACTIVE_LOW>, 
+		<&gpio0 27 GPIO_ACTIVE_LOW>,  
+		<&gpio0 15 GPIO_ACTIVE_LOW>;
+
+	//old
+	// cs-gpios = 
+	// 	<&gpio0 10 GPIO_ACTIVE_LOW>, 
+	// 	<&gpio0 14 GPIO_ACTIVE_LOW>,  
+	// 	<&gpio0 7 GPIO_ACTIVE_LOW>;
+};
+
+&pmic_main {
+	status = "okay";
+	
+	npm1300_gpios {
+		status = "okay";
+	};
+	regulators {
+		status = "okay";
+	};
+	charger {
+		status = "okay";
+	};
+};
+
+&timer0 {
+	status = "okay";
+};
+
+&timer1 {
+	status = "okay";
+};
+
+&timer2 {
+	status = "okay";
+};
+
+&uart1 {
+	compatible = "nordic,nrf-uarte";
 	current-speed = <115200>;
+	status = "okay";
 	pinctrl-0 = <&uart1_default>;
 	pinctrl-1 = <&uart1_sleep>;
 	pinctrl-names = "default", "sleep";
 };
 
-arduino_i2c: &i2c2 {
-	compatible = "nordic,nrf-twim";
+&uart0 {
+	compatible = "nordic,nrf-uarte";
+	current-speed = <115200>;
 	status = "okay";
-	pinctrl-0 = <&i2c2_default>;
-	pinctrl-1 = <&i2c2_sleep>;
-	pinctrl-names = "default", "sleep";
-	clock-frequency = <I2C_BITRATE_FAST>;
-
-	pcal6408a: pcal6408a@21 {
-		compatible = "nxp,pcal6408a";
-		status = "disabled";
-		reg = <0x21>;
-		gpio-controller;
-		#gpio-cells = <2>;
-		ngpios = <8>;
-		int-gpios = <&gpio0 19 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
-	};
-};
-
-&ext_flash {
-	status = "okay";
-};
-
-&pwm0 {
-	status = "okay";
-	pinctrl-0 = <&pwm0_default>;
-	pinctrl-1 = <&pwm0_sleep>;
+	pinctrl-0 = <&uart0_default>;
+	pinctrl-1 = <&uart0_sleep>;
 	pinctrl-names = "default", "sleep";
 };
 

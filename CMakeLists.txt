@@ -6,5 +6,5 @@ project(9151_testing)
 
 target_sources(app PRIVATE src/main.c)
 #target_sources(app PRIVATE src/spi_thread.c)
-#target_soruces(app PRIVATE src/lte_helper.c)
-#target_sources(app PRIVATE src/fota.c)
+target_sources(app PRIVATE src/lte_helper.c)
+target_sources(app PRIVATE src/fota.c)

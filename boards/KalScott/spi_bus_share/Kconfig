@@ -1,0 +1,52 @@
+# SPI Bus Share Module Configuration
+
+menuconfig SPI_BUS_SHARE
+	bool "SPI Bus Sharing Support"
+	depends on SPI || NORDIC_QSPI_NOR
+	depends on KESTREL_SPI_BUS_SHARE
+	default y if KESTREL_SPI_BUS_SHARE
+	help
+	  Enable SPI/QSPI bus sharing/arbitration support for managing access
+	  to a shared bus between multiple components (e.g., external
+	  flash and other SPI/QSPI devices).
+
+	  This option is controlled by the board-level KESTREL_SPI_BUS_SHARE
+	  setting and affects both MCUboot and application builds.
+
+if SPI_BUS_SHARE
+
+config SPI_BUS_SHARE_BOOTLOADER
+	bool "SPI Bus Share in Bootloader context"
+	default n
+	help
+	  Enable this when the SPI bus share module is being used in a
+	  bootloader context (MCUboot). This affects initialization timing
+	  and available features. Requires CONFIG_BOOT_GO_HOOKS.
+
+config SPI_BUS_SHARE_SHELL
+	bool "SPI Bus Share Shell Commands"
+	depends on SHELL
+	help
+	  Enable shell commands for debugging and testing SPI bus sharing.
+	  Provides commands to inspect bus state, manually request/release
+	  the bus, and view statistics.
+
+config SPI_BUS_SHARE_NRF9151
+	bool
+	default y if SOC_NRF9151_LACA || SOC_NRF9120 || SOC_NRF9160
+	help
+	  Automatically enabled for nRF9151/nRF9120/nRF9160 SoCs.
+
+config SPI_BUS_SHARE_NRF5340
+	bool
+	default y if SOC_NRF5340_CPUAPP || SOC_NRF5340_CPUNET
+	help
+	  Automatically enabled for nRF5340 SoC.
+
+config SPI_BUS_SHARE_DETERM
+	bool "Deterministic Arbitration"
+	default y
+	help
+	 Use deterministic model of arbitration. i.e. always a mcu owns spi bus
+
+endif # SPI_BUS_SHARE

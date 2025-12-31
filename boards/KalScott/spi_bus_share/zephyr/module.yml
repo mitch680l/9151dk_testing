@@ -1,0 +1,4 @@
+name: mcuboot_spi_hooks
+build:
+  cmake: zephyr
+  kconfig: ../Kconfig

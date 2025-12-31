@@ -6,12 +6,25 @@
 
 #include "fota.h"
 
+#include <zephyr/logging/log.h>
+#include <zephyr/shell/shell.h>
+#include <stdlib.h>
+#include <string.h>
 #include <nrf_socket.h>
 
 
 
 fota_callback_t state_callback = NULL;
+enum fota_state current_state = FOTA_IDLE;
+/* OTA configuration - initialized with default values */
+struct ota_config_t ota_config = {
+    .server_addr = "44.209.5.53",  
+    .cert_tag = "-1"  
+};
+
+const char *firmware_filename = "/app_update.bin";
 struct k_work fota_work;
+static char custom_filename[128] = {0};
 
 LOG_MODULE_REGISTER(fota, LOG_LEVEL_INF);
 
@@ -200,3 +213,154 @@ int fota_cancel(void)
 
     return 0;
 }
+
+/**
+ * @brief Set FOTA server configuration
+ */
+void fota_set_server(const char *server_addr, const char *cert_tag)
+{
+    ota_config.server_addr = server_addr;
+    ota_config.cert_tag = cert_tag;
+    LOG_INF("FOTA server set to: %s (cert: %s)", server_addr, cert_tag);
+}
+
+/**
+ * @brief Set custom firmware filename for download
+ */
+void fota_set_filename(const char *filename)
+{
+    strncpy(custom_filename, filename, sizeof(custom_filename) - 1);
+    custom_filename[sizeof(custom_filename) - 1] = '\0';
+    firmware_filename = custom_filename;
+    LOG_INF("FOTA filename set to: %s", firmware_filename);
+}
+
+/**
+ * @brief Shell command to start FOTA download with custom filename
+ */
+static int cmd_fota_download(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 2) {
+        shell_error(sh, "Usage: fota download <filename>");
+        shell_print(sh, "Example: fota download /app_update.bin");
+        return -EINVAL;
+    }
+
+    /* Set the custom filename */
+    fota_set_filename(argv[1]);
+
+    /* Check current state */
+    if (current_state != FOTA_IDLE && current_state != FOTA_CONNECTED) {
+        shell_error(sh, "FOTA already in progress (state: %d)", current_state);
+        return -EBUSY;
+    }
+
+    /* Transition to connected state if idle */
+    if (current_state == FOTA_IDLE) {
+        set_state(FOTA_CONNECTED, 0);
+    }
+
+    /* Start the download */
+    shell_print(sh, "Starting FOTA download: %s", firmware_filename);
+    int err = check_fota_server();
+    if (err) {
+        shell_error(sh, "Failed to start FOTA download: %d", err);
+        return err;
+    }
+
+    shell_print(sh, "FOTA download initiated successfully");
+    return 0;
+}
+
+/**
+ * @brief Shell command to set FOTA server
+ */
+static int cmd_fota_set_server(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 2) {
+        shell_error(sh, "Usage: fota server <server_url> [cert_tag]");
+        shell_print(sh, "Example: fota server https://example.com/fota 16842753");
+        return -EINVAL;
+    }
+
+    const char *cert = (argc >= 3) ? argv[2] : ota_config.cert_tag;
+    fota_set_server(argv[1], cert);
+
+    shell_print(sh, "FOTA server configured");
+    return 0;
+}
+
+/**
+ * @brief Shell command to check FOTA status
+ */
+static int cmd_fota_status(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    const char *state_str[] = {
+        "IDLE",
+        "CONNECTED",
+        "DOWNLOADING",
+        "READY_TO_APPLY",
+        "APPLYING"
+    };
+
+    shell_print(sh, "FOTA Status:");
+    shell_print(sh, "  State: %s (%d)", state_str[current_state], current_state);
+    shell_print(sh, "  Server: %s", ota_config.server_addr);
+    shell_print(sh, "  Cert Tag: %s", ota_config.cert_tag);
+    shell_print(sh, "  Filename: %s", firmware_filename);
+
+    return 0;
+}
+
+/**
+ * @brief Shell command to apply FOTA update
+ */
+static int cmd_fota_apply(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    int err = fota_apply_update();
+    if (err) {
+        shell_error(sh, "Failed to apply update: %d", err);
+        return err;
+    }
+
+    shell_print(sh, "Applying update and rebooting...");
+    return 0;
+}
+
+/**
+ * @brief Shell command to cancel FOTA operation
+ */
+static int cmd_fota_cancel_shell(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    int err = fota_cancel();
+    if (err) {
+        shell_error(sh, "Failed to cancel FOTA: %d", err);
+        return err;
+    }
+
+    shell_print(sh, "FOTA operation cancelled");
+    return 0;
+}
+
+/* Shell command tree */
+SHELL_STATIC_SUBCMD_SET_CREATE(fota_cmds,
+    SHELL_CMD_ARG(download, NULL, "Download firmware from server\nUsage: fota download <filename>",
+                  cmd_fota_download, 2, 0),
+    SHELL_CMD_ARG(server, NULL, "Set FOTA server\nUsage: fota server <url> [cert_tag]",
+                  cmd_fota_set_server, 2, 1),
+    SHELL_CMD_ARG(status, NULL, "Show FOTA status", cmd_fota_status, 1, 0),
+    SHELL_CMD_ARG(apply, NULL, "Apply downloaded update", cmd_fota_apply, 1, 0),
+    SHELL_CMD_ARG(cancel, NULL, "Cancel FOTA operation", cmd_fota_cancel_shell, 1, 0),
+    SHELL_SUBCMD_SET_END
+);
+
+SHELL_CMD_REGISTER(fota, &fota_cmds, "FOTA commands", NULL);
