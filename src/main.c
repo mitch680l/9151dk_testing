@@ -9,16 +9,16 @@ int main(void)
         printk("nRF9151 test running\n");
         modem_configure();
         while (1) {
-        LOG_INF("1");
+        LOG_INF("6");
         //printk("running\n");
         k_msleep(1000);
-        LOG_INF("2");
+        LOG_INF("7");
         k_msleep(1000);
-        LOG_INF("3");
+        LOG_INF("8");
         k_msleep(1000);
-        LOG_INF("4");
+        LOG_INF("9");
         k_msleep(1000);
-        LOG_INF("5");
+        LOG_INF("10");
         }
         return 0;
 }

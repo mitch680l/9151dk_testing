@@ -5,25 +5,24 @@
 #include <zephyr/kernel.h>
 #include <zephyr/dfu/mcuboot.h>
 #include <zephyr/sys/reboot.h>
-#include <modem/nrf_modem_lib.h>
-#include <modem/lte_lc.h>
-#include <modem/modem_key_mgmt.h>
-#include <net/fota_download.h>
-#include <dfu/dfu_target_mcuboot.h>
+#include <zephyr/storage/flash_map.h>
 
-/* FOTA state machine states */
-enum fota_state {
-    FOTA_IDLE,
-    FOTA_CONNECTED,
-    FOTA_DOWNLOADING,
-    FOTA_READY_TO_APPLY,
-    FOTA_APPLYING
+#ifndef THIS_IS_5340
+/* Download functionality only needed on nRF9151 */
+#include <net/download_client.h>
+#include <zephyr/storage/stream_flash.h>
+#include <zephyr/net/tls_credentials.h>
+
+/* Download state */
+enum download_state {
+    DOWNLOAD_IDLE,
+    DOWNLOAD_IN_PROGRESS,
+    DOWNLOAD_COMPLETE,
+    DOWNLOAD_ERROR
 };
 
-typedef void (*fota_callback_t)(enum fota_state new_state, int error);
-
-extern enum fota_state current_state;
-extern fota_callback_t state_callback;
+/* Download callback type */
+typedef void (*download_callback_t)(enum download_state state, int error);
 
 struct ota_config_t {
     const char *server_addr;
@@ -31,23 +30,16 @@ struct ota_config_t {
 };
 
 extern struct ota_config_t ota_config;
-extern const char *firmware_filename;
 
+void ota_init(download_callback_t callback);
+void ota_set_server(const char *server_addr, const char *cert_tag);
+int ota_download_9151(const char *filename);
+int ota_download_5340(const char *filename);
+int ota_cancel(void);
 
+#endif /* !THIS_IS_5340 */
 
-
-void fota_work_cb(struct k_work *work);
-void fota_dl_handler(const struct fota_download_evt *evt);
-int modem_configure_and_connect(void);
-int download_firmware(void);
-void set_state(enum fota_state new_state, int error);
-int fota_init(fota_callback_t callback);
-int fota_apply_update(void);
-int check_fota_server(void);
-int fota_cancel(void);
-enum fota_state fota_get_state(void);
-void fota_set_server(const char *server_addr, const char *cert_tag);
-void fota_set_filename(const char *filename);
-
+/* Functions available on both 9151 and 5340 */
+int ota_apply(void);
 
 #endif /* FOTA_H */

@@ -23,28 +23,11 @@ void lte_handler(const struct lte_lc_evt *const evt)
                     evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_HOME ?
                     "Connected - home network" : "Connected - roaming");
             k_sem_give(&lte_connected);
-            if (current_state == FOTA_IDLE) {
-                set_state(FOTA_CONNECTED, 0);
-            }
-        } else {
-            if (current_state == FOTA_CONNECTED) {
-                LOG_INF("Disconnected from LTE network while in FOTA_CONNECTED state");
-                set_state(FOTA_IDLE, 0);
-            }
         }
         break;
 
     case LTE_LC_EVT_RRC_UPDATE:
         LOG_INF("RRC mode: %s", evt->rrc_mode == LTE_LC_RRC_MODE_CONNECTED ? "Connected" : "Idle");
-        if (evt->rrc_mode == LTE_LC_RRC_MODE_CONNECTED) {
-            if (current_state == FOTA_IDLE) {
-                set_state(FOTA_CONNECTED, 0);
-            }
-        } else {
-            if (current_state == FOTA_DOWNLOADING) {
-                set_state(FOTA_IDLE, 0);
-            }
-        }
         break;
 
     case LTE_LC_EVT_CELL_UPDATE:
@@ -62,9 +45,6 @@ void lte_handler(const struct lte_lc_evt *const evt)
             break;
         case LTE_LC_LTE_MODE_NONE:
             LOG_INF("LTE mode updated: None (off)");
-            if (current_state == FOTA_CONNECTED || current_state == FOTA_DOWNLOADING) {
-                set_state(FOTA_IDLE, 0);
-            }
             break;
         default:
             LOG_INF("LTE mode updated: Unknown");
@@ -95,11 +75,7 @@ int modem_configure(void)
     }
 
 
-    err = fota_init(set_state);
-    if (err) {
-        LOG_ERR("FOTA init failed: %d", err);
-        return err;
-    }
+    ota_init(NULL);
    
     //provision_all_tls_credentials();
 
