@@ -187,7 +187,7 @@ static int ota_download_common(const char *filename, int partition_id,
 
 
     err = stream_flash_init(&stream_ctx, target_flash_area->fa_dev, dl_buf,
-                           sizeof(dl_buf), target_flash_area->fa_off,
+                           sizeof(dl_buf), 0, 
                            target_flash_area->fa_size, NULL);
     if (err) {
         LOG_ERR("stream_flash_init failed: %d", err);
@@ -195,7 +195,7 @@ static int ota_download_common(const char *filename, int partition_id,
         target_flash_area = NULL;
         return err;
     }
-    LOG_INF("stream_flash initialized with offset 0x%lx", target_flash_area->fa_off);
+    LOG_INF("stream_flash initialized with 0 offset (partition-relative)");
 
     LOG_INF("Erasing partition...");
     err = flash_area_erase(target_flash_area, 0, target_flash_area->fa_size);
@@ -303,6 +303,17 @@ int ota_download_5340(const char *filename)
 }
 
 /**
+ * @brief Download firmware for nRF5340 network core
+ */
+int ota_download_5340net(const char *filename)
+{
+    LOG_INF("Starting nRF5340 network download");
+    return ota_download_common(filename,
+                               FIXED_PARTITION_ID(mcuboot_secondary_5340_1),
+                               TARGET_5340);
+}
+
+/**
  * @brief Cancel OTA operation
  */
 int ota_cancel(void)
@@ -332,29 +343,21 @@ int ota_cancel(void)
  */
 int ota_apply(void)
 {
-#ifdef THIS_IS_5340
-    LOG_INF("nRF5340 firmware update apply is not supported on this device");
-    LOG_INF("The nRF5340 firmware must be flashed via SPI or external programmer");
-    return -ENOTSUP;
-#else
     int err;
 
+#ifdef THIS_IS_5340
+    LOG_INF("Requesting MCUboot upgrade for nRF5340...");
+#else
     LOG_INF("Requesting MCUboot upgrade for nRF9151...");
+#endif
 
     int confirmed = boot_is_img_confirmed();
     LOG_INF("Current image confirmed status: %d", confirmed);
 
     err = boot_request_upgrade(BOOT_UPGRADE_TEST);
     if (err) {
-        LOG_ERR("boot_request_upgrade failed: %d (EFAULT means MCUboot shared area not accessible)", err);
-        LOG_ERR("This might be a flash/partition configuration issue");
-
-        LOG_INF("Attempting alternative method...");
-        err = boot_set_pending(false);
-        if (err) {
-            LOG_ERR("boot_set_pending also failed: %d", err);
-            return err;
-        }
+        LOG_ERR("boot_request_upgrade failed: %d", err);
+        return err;
     }
 
     LOG_INF("Upgrade scheduled. Rebooting in 2 seconds...");
@@ -362,7 +365,6 @@ int ota_apply(void)
     sys_reboot(SYS_REBOOT_WARM);
 
     return 0;
-#endif
 }
 
 #ifndef THIS_IS_5340
@@ -407,6 +409,26 @@ static int cmd_ota_download_5340(const struct shell *sh, size_t argc, char **arg
     shell_print(sh, "nRF5340 download started");
     return 0;
 }
+
+/**
+ * @brief Shell command to download 5340 network core
+ */
+
+static int cmd_ota_download_5340net (const struct shell *sh, size_t argc, char **argv) {
+    if (argc < 2) {
+        shell_error(sh, "Usage: ota download5340net <filename>");
+        shell_print(sh, "Example: ota download5430net firmware_storage/nrf5340_net.bin");
+    }
+
+    int err = ota_download_5340net(argv[1]);
+    if(err) {
+        shell_error(sh, "Failed to start download: %d", err);
+        return err;
+    }
+    shell_print(sh, "nRF5340net download started");
+    return 0;
+}
+
 
 /**
  * @brief Shell command to set OTA server
@@ -461,12 +483,13 @@ static int cmd_ota_verify_9151(const struct shell *sh, size_t argc, char **argv)
 
     const struct flash_area *fa;
     #ifdef THIS_IS_5340
-  
+
     int err = flash_area_open(FIXED_PARTITION_ID(ext_flash_reserved), &fa);
     if (err) {
         shell_error(sh, "Failed to open secondary partition: %d", err);
         return err;
     }
+    shell_print(sh, "=== nRF9151 Image Verification (ext_flash_reserved) ===");
 
     #else
 
@@ -475,9 +498,14 @@ static int cmd_ota_verify_9151(const struct shell *sh, size_t argc, char **argv)
         shell_error(sh, "Failed to open secondary partition: %d", err);
         return err;
     }
+    shell_print(sh, "=== nRF9151 Image Verification (mcuboot_secondary) ===");
     #endif
-    
-    uint8_t header[32];
+
+    shell_print(sh, "Partition info:");
+    shell_print(sh, "  Address: 0x%08lx", fa->fa_off);
+    shell_print(sh, "  Size: %zu bytes (0x%zx)", fa->fa_size, fa->fa_size);
+
+    uint8_t header[512];
     err = flash_area_read(fa, 0, header, sizeof(header));
     if (err) {
         shell_error(sh, "Failed to read partition: %d", err);
@@ -485,14 +513,126 @@ static int cmd_ota_verify_9151(const struct shell *sh, size_t argc, char **argv)
         return err;
     }
 
-    shell_print(sh, "Secondary partition first 32 bytes:");
-    shell_hexdump(sh, header, sizeof(header));
+    shell_print(sh, "\nFirst 32 bytes:");
+    shell_hexdump(sh, header, 32);
 
-    uint32_t magic = *(uint32_t *)header;
+    uint32_t magic = *(uint32_t *)&header[0];
+    shell_print(sh, "\n--- MCUboot Header Analysis ---");
+    shell_print(sh, "Magic: 0x%08x %s", magic,
+                (magic == 0x96f3b83d) ? "[VALID]" : "[INVALID - Expected 0x96f3b83d]");
+
     if (magic == 0x96f3b83d) {
-        shell_print(sh, "Valid MCUboot magic found!");
+        uint32_t load_addr = *(uint32_t *)&header[4];
+        uint16_t hdr_size = *(uint16_t *)&header[8];
+        uint16_t protect_tlv_size = *(uint16_t *)&header[10];
+        uint32_t img_size = *(uint32_t *)&header[12];
+        uint32_t flags = *(uint32_t *)&header[16];
+        uint8_t ver_major = header[20];
+        uint8_t ver_minor = header[21];
+        uint16_t ver_revision = *(uint16_t *)&header[22];
+        uint32_t ver_build = *(uint32_t *)&header[24];
+
+        shell_print(sh, "Load Address: 0x%08x", load_addr);
+        shell_print(sh, "Header Size: %u bytes", hdr_size);
+        shell_print(sh, "Protected TLV Size: %u bytes", protect_tlv_size);
+        shell_print(sh, "Image Size: %u bytes (0x%x)", img_size, img_size);
+        shell_print(sh, "Flags: 0x%08x", flags);
+        shell_print(sh, "Version: %u.%u.%u+%u",
+                    ver_major, ver_minor, ver_revision, ver_build);
+
+
+        if (img_size > fa->fa_size) {
+            shell_error(sh, "WARNING: Image size (%u) exceeds partition size (%zu)!",
+                       img_size, fa->fa_size);
+        }
+
+        /* Read and analyze TLV area */
+        uint32_t tlv_offset = hdr_size + img_size;
+        shell_print(sh, "\n--- TLV Area Analysis ---");
+        shell_print(sh, "TLV offset: 0x%x (%u bytes from start)", tlv_offset, tlv_offset);
+
+        if (tlv_offset + 4 > fa->fa_size) {
+            shell_error(sh, "ERROR: TLV offset exceeds partition size!");
+        } else {
+            uint8_t tlv_header[256];
+            size_t tlv_read_size = MIN(sizeof(tlv_header), fa->fa_size - tlv_offset);
+
+            err = flash_area_read(fa, tlv_offset, tlv_header, tlv_read_size);
+            if (err) {
+                shell_error(sh, "Failed to read TLV area: %d", err);
+            } else {
+                uint16_t tlv_magic = *(uint16_t *)&tlv_header[0];
+                uint16_t tlv_total = *(uint16_t *)&tlv_header[2];
+
+                shell_print(sh, "TLV Magic: 0x%04x %s", tlv_magic,
+                           (tlv_magic == 0x6907) ? "[VALID - IMAGE_TLV_INFO_MAGIC]" :
+                           (tlv_magic == 0x6908) ? "[VALID - IMAGE_TLV_PROT_INFO_MAGIC]" :
+                           "[INVALID]");
+                shell_print(sh, "TLV Total Size: %u bytes", tlv_total);
+
+                if (tlv_magic == 0x6907 || tlv_magic == 0x6908) {
+                    /* Parse TLV entries */
+                    shell_print(sh, "\nTLV Entries:");
+                    uint16_t offset = 4; /* After TLV info header */
+                    bool found_signature = false;
+                    bool found_hash = false;
+
+                    while (offset + 4 <= tlv_read_size && offset < tlv_total) {
+                        uint16_t tlv_type = *(uint16_t *)&tlv_header[offset];
+                        uint16_t tlv_len = *(uint16_t *)&tlv_header[offset + 2];
+
+                        const char *type_name = "UNKNOWN";
+                        if (tlv_type == 0x01) { type_name = "KEYHASH"; }
+                        else if (tlv_type == 0x10) { type_name = "SHA256"; found_hash = true; }
+                        else if (tlv_type == 0x22) { type_name = "ECDSA_SIG"; found_signature = true; }
+                        else if (tlv_type == 0x20) { type_name = "RSA2048_PSS"; found_signature = true; }
+                        else if (tlv_type == 0x24) { type_name = "ED25519"; found_signature = true; }
+                        else if (tlv_type == 0x40) { type_name = "DEPENDENCY"; }
+
+                        shell_print(sh, "  Type: 0x%04x (%s), Length: %u bytes",
+                                   tlv_type, type_name, tlv_len);
+
+                        offset += 4 + tlv_len;
+                    }
+
+                    shell_print(sh, "\n--- Validation Summary ---");
+                    if (found_hash) {
+                        shell_print(sh, "[OK] Image hash (SHA256) present");
+                    } else {
+                        shell_error(sh, "[FAIL] No image hash found!");
+                    }
+
+                    if (found_signature) {
+                        shell_print(sh, "[OK] Image signature present");
+                    } else {
+                        shell_error(sh, "[FAIL] No signature found - MCUboot will REJECT unsigned image!");
+                    }
+
+                    if (found_hash && found_signature) {
+                        shell_print(sh, "\n[VERDICT: Image is properly signed and should be accepted]");
+                    } else {
+                        shell_error(sh, "\n[VERDICT: Image is MISSING signature - MCUboot will REJECT]");
+                    }
+                } else {
+                    shell_error(sh, "Invalid TLV magic - cannot parse TLV entries");
+                    shell_print(sh, "First 64 bytes of TLV area:");
+                    shell_hexdump(sh, tlv_header, MIN(64, tlv_read_size));
+                }
+            }
+        }
     } else {
-        shell_print(sh, "WARNING: MCUboot magic not found (expected 0x96f3b83d, got 0x%08x)", magic);
+        shell_error(sh, "\n[VERDICT: Image header INVALID - MCUboot will reject this image]");
+
+ 
+        if (header[0] == '<' || header[0] == '{') {
+            shell_error(sh, "ERROR: Downloaded file appears to be HTML/JSON, not a binary image!");
+            shell_print(sh, "First 128 bytes as text:");
+            for (int i = 0; i < MIN(128, sizeof(header)); i++) {
+                if (header[i] >= 32 && header[i] < 127) {
+                    shell_print(sh, "%c", header[i]);
+                }
+            }
+        }
     }
 
     flash_area_close(fa);
@@ -514,14 +654,21 @@ static int cmd_ota_verify_5340(const struct shell *sh, size_t argc, char **argv)
         shell_error(sh, "Failed to open secondary partition: %d", err);
         return err;
     }
+    shell_print(sh, "=== nRF5340 Image Verification (mcuboot_secondary) ===");
     #else
     int err = flash_area_open(FIXED_PARTITION_ID(mcuboot_secondary_5340), &fa);
     if (err) {
         shell_error(sh, "Failed to open secondary partition: %d", err);
         return err;
     }
+    shell_print(sh, "=== nRF5340 Image Verification (mcuboot_secondary_5340) ===");
     #endif
-    uint8_t header[32];
+
+    shell_print(sh, "Partition info:");
+    shell_print(sh, "  Address: 0x%08lx", fa->fa_off);
+    shell_print(sh, "  Size: %zu bytes (0x%zx)", fa->fa_size, fa->fa_size);
+
+    uint8_t header[512];
     err = flash_area_read(fa, 0, header, sizeof(header));
     if (err) {
         shell_error(sh, "Failed to read partition: %d", err);
@@ -529,14 +676,124 @@ static int cmd_ota_verify_5340(const struct shell *sh, size_t argc, char **argv)
         return err;
     }
 
-    shell_print(sh, "mcuboot_secondary_5340 partition first 32 bytes:");
-    shell_hexdump(sh, header, sizeof(header));
+    shell_print(sh, "\nFirst 32 bytes:");
+    shell_hexdump(sh, header, 32);
 
-    uint32_t magic = *(uint32_t *)header;
+    uint32_t magic = *(uint32_t *)&header[0];
+    shell_print(sh, "\n--- MCUboot Header Analysis ---");
+    shell_print(sh, "Magic: 0x%08x %s", magic,
+                (magic == 0x96f3b83d) ? "[VALID]" : "[INVALID - Expected 0x96f3b83d]");
+
     if (magic == 0x96f3b83d) {
-        shell_print(sh, "Valid MCUboot magic found!");
+        uint32_t load_addr = *(uint32_t *)&header[4];
+        uint16_t hdr_size = *(uint16_t *)&header[8];
+        uint16_t protect_tlv_size = *(uint16_t *)&header[10];
+        uint32_t img_size = *(uint32_t *)&header[12];
+        uint32_t flags = *(uint32_t *)&header[16];
+        uint8_t ver_major = header[20];
+        uint8_t ver_minor = header[21];
+        uint16_t ver_revision = *(uint16_t *)&header[22];
+        uint32_t ver_build = *(uint32_t *)&header[24];
+
+        shell_print(sh, "Load Address: 0x%08x", load_addr);
+        shell_print(sh, "Header Size: %u bytes", hdr_size);
+        shell_print(sh, "Protected TLV Size: %u bytes", protect_tlv_size);
+        shell_print(sh, "Image Size: %u bytes (0x%x)", img_size, img_size);
+        shell_print(sh, "Flags: 0x%08x", flags);
+        shell_print(sh, "Version: %u.%u.%u+%u",
+                    ver_major, ver_minor, ver_revision, ver_build);
+
+        if (img_size > fa->fa_size) {
+            shell_error(sh, "WARNING: Image size (%u) exceeds partition size (%zu)!",
+                       img_size, fa->fa_size);
+        }
+
+        /* Read and analyze TLV area */
+        uint32_t tlv_offset = hdr_size + img_size;
+        shell_print(sh, "\n--- TLV Area Analysis ---");
+        shell_print(sh, "TLV offset: 0x%x (%u bytes from start)", tlv_offset, tlv_offset);
+
+        if (tlv_offset + 4 > fa->fa_size) {
+            shell_error(sh, "ERROR: TLV offset exceeds partition size!");
+        } else {
+            uint8_t tlv_header[256];
+            size_t tlv_read_size = MIN(sizeof(tlv_header), fa->fa_size - tlv_offset);
+
+            err = flash_area_read(fa, tlv_offset, tlv_header, tlv_read_size);
+            if (err) {
+                shell_error(sh, "Failed to read TLV area: %d", err);
+            } else {
+                uint16_t tlv_magic = *(uint16_t *)&tlv_header[0];
+                uint16_t tlv_total = *(uint16_t *)&tlv_header[2];
+
+                shell_print(sh, "TLV Magic: 0x%04x %s", tlv_magic,
+                           (tlv_magic == 0x6907) ? "[VALID - IMAGE_TLV_INFO_MAGIC]" :
+                           (tlv_magic == 0x6908) ? "[VALID - IMAGE_TLV_PROT_INFO_MAGIC]" :
+                           "[INVALID]");
+                shell_print(sh, "TLV Total Size: %u bytes", tlv_total);
+
+                if (tlv_magic == 0x6907 || tlv_magic == 0x6908) {
+                    /* Parse TLV entries */
+                    shell_print(sh, "\nTLV Entries:");
+                    uint16_t offset = 4; /* After TLV info header */
+                    bool found_signature = false;
+                    bool found_hash = false;
+
+                    while (offset + 4 <= tlv_read_size && offset < tlv_total) {
+                        uint16_t tlv_type = *(uint16_t *)&tlv_header[offset];
+                        uint16_t tlv_len = *(uint16_t *)&tlv_header[offset + 2];
+
+                        const char *type_name = "UNKNOWN";
+                        if (tlv_type == 0x01) { type_name = "KEYHASH"; }
+                        else if (tlv_type == 0x10) { type_name = "SHA256"; found_hash = true; }
+                        else if (tlv_type == 0x22) { type_name = "ECDSA_SIG"; found_signature = true; }
+                        else if (tlv_type == 0x20) { type_name = "RSA2048_PSS"; found_signature = true; }
+                        else if (tlv_type == 0x24) { type_name = "ED25519"; found_signature = true; }
+                        else if (tlv_type == 0x40) { type_name = "DEPENDENCY"; }
+
+                        shell_print(sh, "  Type: 0x%04x (%s), Length: %u bytes",
+                                   tlv_type, type_name, tlv_len);
+
+                        offset += 4 + tlv_len;
+                    }
+
+                    shell_print(sh, "\n--- Validation Summary ---");
+                    if (found_hash) {
+                        shell_print(sh, "[OK] Image hash (SHA256) present");
+                    } else {
+                        shell_error(sh, "[FAIL] No image hash found!");
+                    }
+
+                    if (found_signature) {
+                        shell_print(sh, "[OK] Image signature present");
+                    } else {
+                        shell_error(sh, "[FAIL] No signature found - MCUboot will REJECT unsigned image!");
+                    }
+
+                    if (found_hash && found_signature) {
+                        shell_print(sh, "\n[VERDICT: Image is properly signed and should be accepted]");
+                    } else {
+                        shell_error(sh, "\n[VERDICT: Image is MISSING signature - MCUboot will REJECT]");
+                    }
+                } else {
+                    shell_error(sh, "Invalid TLV magic - cannot parse TLV entries");
+                    shell_print(sh, "First 64 bytes of TLV area:");
+                    shell_hexdump(sh, tlv_header, MIN(64, tlv_read_size));
+                }
+            }
+        }
     } else {
-        shell_print(sh, "WARNING: MCUboot magic not found (expected 0x96f3b83d, got 0x%08x)", magic);
+        shell_error(sh, "\n[VERDICT: Image header INVALID - MCUboot will reject this image]");
+
+        if (header[0] == '<' || header[0] == '{') {
+            shell_error(sh, "ERROR: Downloaded file appears to be HTML/JSON, not a binary image!");
+            shell_print(sh, "First 128 bytes as text:");
+            for (int i = 0; i < MIN(128, sizeof(header)); i++) {
+                if (header[i] >= 32 && header[i] < 127) {
+                    shell_print(sh, "%c", header[i]);
+                }
+            }
+        }
     }
 
     flash_area_close(fa);
@@ -592,6 +849,7 @@ static int cmd_ota_apply_5340(const struct shell *sh, size_t argc, char **argv)
 #endif
 }
 
+#ifndef THIS_IS_5340
 /**
  * @brief Shell command to cancel OTA operation
  */
@@ -609,6 +867,7 @@ static int cmd_ota_cancel_shell(const struct shell *sh, size_t argc, char **argv
     shell_print(sh, "OTA operation cancelled");
     return 0;
 }
+#endif /* !THIS_IS_5340 */
 
 
 #ifdef THIS_IS_5340
@@ -631,6 +890,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(ota_cmds,
                   cmd_ota_download_9151, 2, 0),
     SHELL_CMD_ARG(download5340, NULL, "Download nRF5340 firmware\nUsage: ota download5340 <filename>",
                   cmd_ota_download_5340, 2, 0),
+    SHELL_CMD_ARG(download5340net,NULL,"Download nRF5340 network firmware\nUsage: ota download5340net <filename>",cmd_ota_download_5340net,2,0),
     SHELL_CMD_ARG(verify9151, NULL, "Verify downloaded nRF9151 image",
                   cmd_ota_verify_9151, 1, 0),
     SHELL_CMD_ARG(verify5340, NULL, "Verify downloaded nRF5340 image",

@@ -8,12 +8,11 @@
 #include <zephyr/storage/flash_map.h>
 
 #ifndef THIS_IS_5340
-/* Download functionality only needed on nRF9151 */
+
 #include <net/download_client.h>
 #include <zephyr/storage/stream_flash.h>
 #include <zephyr/net/tls_credentials.h>
 
-/* Download state */
 enum download_state {
     DOWNLOAD_IDLE,
     DOWNLOAD_IN_PROGRESS,
@@ -21,7 +20,7 @@ enum download_state {
     DOWNLOAD_ERROR
 };
 
-/* Download callback type */
+
 typedef void (*download_callback_t)(enum download_state state, int error);
 
 struct ota_config_t {
@@ -39,7 +38,6 @@ int ota_cancel(void);
 
 #endif /* !THIS_IS_5340 */
 
-/* Functions available on both 9151 and 5340 */
 int ota_apply(void);
 
 #endif /* FOTA_H */
