@@ -10,7 +10,11 @@
 #include <nrfx.h>
 #include <stdlib.h>
 #include "spi_bus_share.h"
+#include "spi_bus_share_internal.h"
+#include "spi_bus_share_config.h"
 #include <zephyr/drivers/flash.h>
+#include <zephyr/drivers/pinctrl.h>
+#include <hal/nrf_spim.h>
 
 // Kconfig options (from CONFIG_SPI_BUS_SHARE_* in Kconfig):
 // - CONFIG_SPI_BUS_SHARE_BOOTLOADER -> THIS_IS_BOOTLOADER
@@ -25,6 +29,14 @@
 	#ifndef SPI_BUS_CLAIM_ON_NO_MCU
 		#define SPI_BUS_CLAIM_ON_NO_MCU
 	#endif
+#endif
+
+#if defined(ENABLE_CS_MIRROR) && !defined(THIS_IS_NRF5340)
+	#define CS_MIRROR_ON_BECOME_OWNER() cs_mirror_disable()
+	#define CS_MIRROR_ON_BECOME_NOT_OWNER() cs_mirror_enable()
+#else
+	#define CS_MIRROR_ON_BECOME_OWNER() do {} while (0)
+	#define CS_MIRROR_ON_BECOME_NOT_OWNER() do {} while (0)
 #endif
 
 
@@ -58,48 +70,9 @@ There are two trains of thought for arbitration:
 // #define SPI_BUS_CLAIM_ON_NO_MCU
 LOG_MODULE_REGISTER(spi_bus_share, LOG_LEVEL_INF);
 
-#ifdef THIS_IS_NRF5340
-	/* nRF5340 configuration */
-	#define SPI_SCK_PIN   17
-	#define SPI_MOSI_PIN  13
-	#define SPI_MISO_PIN  14
-	#define SPI_CS_PIN    18
-
-	#define SPI_CS1_PIN   27
-	#define SPI_CS2_PIN   15
-
-	#define BUS_REQUEST_PIN  7
-	#define BUS_GRANT_PIN    8
-
-	#define INITIAL_FSM_STATE     FSM_IDLE_OWNER
-	#define INITIAL_OWNER         SPI_BUS_OWNER_THIS_MCU
-	#define SPI_BUS_TYPE          "QSPI"
-#else
-	/* nRF9151 configuration  */
-	#define SPI_SCK_PIN   2
-	#define SPI_MOSI_PIN  3
-	#define SPI_MISO_PIN  1
-	#define SPI_CS_PIN    0
-
-	#define SPI_CS1_PIN   27
-	#define SPI_CS2_PIN   15
-
-	#define BUS_REQUEST_PIN  18
-	#define BUS_GRANT_PIN    19
-
-	#define INITIAL_FSM_STATE     FSM_IDLE_NOT_OWNER
-	#define INITIAL_OWNER         SPI_BUS_OWNER_OTHER_MCU
-	#define SPI_BUS_TYPE          "SPI"
-	static const struct device *spi_dev;
-#endif  
-
-
-#define BUS_REQUEST_TIMEOUT_MS     120000 
-#define BUS_QUICK_GRANT_TIMEOUT_MS 500  
-#define BUS_MISSING_MCU_TIMEOUT_MS 2000  
-#define BUS_LEASE_TIME_MS          5000  
-#define BUS_MAX_HOG_TIME_MS        30000
-#define BUS_RELEASE_TIMEOUT_MS     500
+#ifndef THIS_IS_NRF5340
+const struct device *spi_dev;
+#endif
 
 
 enum bus_fsm_state {
@@ -142,23 +115,20 @@ struct bus_fsm_context {
 	bool other_mcu_detected;
 };
 
-static const struct device *gpio_dev2;
+const struct device *gpio_dev2;
 
-static const struct device *flash_dev;
-static enum spi_bus_owner current_owner = SPI_BUS_OWNER_THIS_MCU;
-static struct k_mutex bus_mutex;
-static struct k_work_delayable init_work;
+const struct device *flash_dev;
+enum spi_bus_owner current_owner = SPI_BUS_OWNER_THIS_MCU;
+struct k_mutex bus_mutex;
 static struct bus_fsm_context fsm_ctx;
 static struct gpio_callback grant_cb_data;
 static struct gpio_callback request_cb_data;
 static bool fsm_initialized = false;
 
-static int configure_pins_as_requester(void);
-static int configure_pins_as_owner(void);
-static int configure_pins_as_idle(void);
-static int configure_pin_tristate(uint32_t pin);
-static int configure_cs_tristate(void);
-static int configure_pins_as_tristate(void);
+#if defined(ENABLE_CS_MIRROR) && !defined(THIS_IS_NRF5340)
+struct gpio_callback cs_mirror_cb_data;
+bool cs_mirror_enabled = false;
+#endif
 
 
 
@@ -235,15 +205,14 @@ static void deferred_grant_handler(struct k_work *work)
 		LOG_INF("GRANT pulled LOW - deferred handover complete");
 
 		k_mutex_unlock(&fsm_ctx.mutex);
-		#ifdef REPLACE_IDLE_WITH_TRISTATE
-		configure_pins_as_tristate();
-		#else
+	
 		configure_pins_as_idle();
-		#endif
 		k_mutex_lock(&fsm_ctx.mutex, K_FOREVER);
 
 		fsm_ctx.state = FSM_IDLE_NOT_OWNER;
 		current_owner = SPI_BUS_OWNER_OTHER_MCU;
+
+		CS_MIRROR_ON_BECOME_NOT_OWNER();
 	} else {
 		LOG_ERR("Failed to tristate bus during deferred grant");
 		gpio_pin_set(gpio_dev2, BUS_GRANT_PIN, 0);
@@ -331,115 +300,6 @@ static void bus_request_isr(const struct device *dev, struct gpio_callback *cb, 
 }
 
 /**
- * @brief Configure both REQUEST and GRANT pins as INPUT for idle state
- * Used when this MCU is idle and needs to listen for both REQUEST and GRANT signals (FSM_IDLE_NOT_OWNER)
- */
-static int configure_pins_as_idle(void)
-{
-	int ret;
-
-	gpio_pin_interrupt_configure(gpio_dev2, BUS_GRANT_PIN, GPIO_INT_DISABLE);
-	gpio_pin_interrupt_configure(gpio_dev2, BUS_REQUEST_PIN, GPIO_INT_DISABLE);
-
-	ret = gpio_pin_configure(gpio_dev2, BUS_REQUEST_PIN, GPIO_INPUT | GPIO_PULL_DOWN);
-	if (ret < 0) {
-		LOG_ERR("Failed to configure REQUEST as input: %d", ret);
-		return ret;
-	}
-
-	ret = gpio_pin_configure(gpio_dev2, BUS_GRANT_PIN, GPIO_INPUT | GPIO_PULL_DOWN);
-	if (ret < 0) {
-		LOG_ERR("Failed to configure GRANT as input: %d", ret);
-		return ret;
-	}
-
-	ret = gpio_pin_interrupt_configure(gpio_dev2, BUS_GRANT_PIN, GPIO_INT_EDGE_BOTH);
-	if (ret < 0) {
-		LOG_ERR("Failed to enable GRANT interrupt: %d", ret);
-		return ret;
-	}
-
-	ret = gpio_pin_interrupt_configure(gpio_dev2, BUS_REQUEST_PIN, GPIO_INT_EDGE_BOTH);
-	if (ret < 0) {
-		LOG_ERR("Failed to enable REQUEST interrupt: %d", ret);
-		return ret;
-	}
-
-	LOG_DBG("Pins configured: REQUEST=INPUT, GRANT=INPUT (idle mode - listening for both)");
-	return 0;
-}
-
-/**
- * @brief Configure REQUEST pin as OUTPUT and GRANT pin as INPUT
- * Used when this MCU is actively requesting the bus (FSM_REQUESTING)
- */
-static int configure_pins_as_requester(void)
-{
-	int ret;
-
-	gpio_pin_interrupt_configure(gpio_dev2, BUS_GRANT_PIN, GPIO_INT_DISABLE);
-	gpio_pin_interrupt_configure(gpio_dev2, BUS_REQUEST_PIN, GPIO_INT_DISABLE);
-
-	ret = gpio_pin_configure(gpio_dev2, BUS_REQUEST_PIN, GPIO_OUTPUT_INACTIVE);
-	if (ret < 0) {
-		LOG_ERR("Failed to configure REQUEST as output: %d", ret);
-		return ret;
-	}
-
-	ret = gpio_pin_configure(gpio_dev2, BUS_GRANT_PIN, GPIO_INPUT | GPIO_PULL_DOWN);
-	if (ret < 0) {
-		LOG_ERR("Failed to configure GRANT as input: %d", ret);
-		return ret;
-	}
-
-	ret = gpio_pin_interrupt_configure(gpio_dev2, BUS_GRANT_PIN, GPIO_INT_EDGE_BOTH);
-	if (ret < 0) {
-		LOG_ERR("Failed to enable GRANT interrupt: %d", ret);
-		return ret;
-	}
-
-	LOG_DBG("Pins configured: REQUEST=OUTPUT, GRANT=INPUT (requester mode)");
-	return 0;
-}
-
-/**
- * @brief Configure REQUEST pin as INPUT and GRANT pin as OUTPUT
- * Used when this MCU owns the bus and can grant to others (FSM_IDLE_OWNER)
- */
-static int configure_pins_as_owner(void)
-{
-	int ret;
-
-
-	gpio_pin_interrupt_configure(gpio_dev2, BUS_GRANT_PIN, GPIO_INT_DISABLE);
-	gpio_pin_interrupt_configure(gpio_dev2, BUS_REQUEST_PIN, GPIO_INT_DISABLE);
-
-
-	ret = gpio_pin_configure(gpio_dev2, BUS_REQUEST_PIN, GPIO_INPUT | GPIO_PULL_DOWN);
-	if (ret < 0) {
-		LOG_ERR("Failed to configure REQUEST as input: %d", ret);
-		return ret;
-	}
-
-
-	ret = gpio_pin_configure(gpio_dev2, BUS_GRANT_PIN, GPIO_OUTPUT_INACTIVE);
-	if (ret < 0) {
-		LOG_ERR("Failed to configure GRANT as output: %d", ret);
-		return ret;
-	}
-
-
-	ret = gpio_pin_interrupt_configure(gpio_dev2, BUS_REQUEST_PIN, GPIO_INT_EDGE_BOTH);
-	if (ret < 0) {
-		LOG_ERR("Failed to enable REQUEST interrupt: %d", ret);
-		return ret;
-	}
-
-	LOG_DBG("Pins configured: REQUEST=INPUT, GRANT=OUTPUT (owner mode)");
-	return 0;
-}
-
-/**
  * @brief Post an event to the FSM
  */
 static int fsm_post_event(enum bus_fsm_event event)
@@ -524,6 +384,9 @@ static int fsm_process_event(enum bus_fsm_event event)
 
 					fsm_ctx.state = FSM_IDLE_OWNER;
 					current_owner = SPI_BUS_OWNER_THIS_MCU;
+
+					CS_MIRROR_ON_BECOME_OWNER();
+
 				} else {
 					fsm_ctx.state = FSM_ERROR;
 				}
@@ -560,6 +423,9 @@ static int fsm_process_event(enum bus_fsm_event event)
 
 				fsm_ctx.state = FSM_IDLE_OWNER;
 				current_owner = SPI_BUS_OWNER_THIS_MCU;
+
+				CS_MIRROR_ON_BECOME_OWNER();
+
 			} else {
 				gpio_pin_set(gpio_dev2, BUS_REQUEST_PIN, 0);
 				fsm_ctx.state = FSM_ERROR;
@@ -583,6 +449,8 @@ static int fsm_process_event(enum bus_fsm_event event)
 
 				fsm_ctx.state = FSM_IDLE_OWNER;
 				current_owner = SPI_BUS_OWNER_THIS_MCU;
+
+				CS_MIRROR_ON_BECOME_OWNER();
 				LOG_INF("SPI bus claimed successfully");
 			} else {
 				fsm_ctx.state = FSM_ERROR;
@@ -632,15 +500,14 @@ static int fsm_process_event(enum bus_fsm_event event)
 					LOG_DBG("GRANT pulled LOW - handover complete");
 
 					k_mutex_unlock(&fsm_ctx.mutex);
-					#ifdef REPLACE_IDLE_WITH_TRISTATE
-					configure_pins_as_tristate();
-					#else
+					
 					configure_pins_as_idle();
-					#endif
 					k_mutex_lock(&fsm_ctx.mutex, K_FOREVER);
 
 					fsm_ctx.state = FSM_IDLE_NOT_OWNER;
 					current_owner = SPI_BUS_OWNER_OTHER_MCU;
+
+					CS_MIRROR_ON_BECOME_NOT_OWNER();
 				} else {
 					LOG_ERR("Failed to tristate bus during grant");
 					gpio_pin_set(gpio_dev2, BUS_GRANT_PIN, 0);
@@ -659,15 +526,15 @@ static int fsm_process_event(enum bus_fsm_event event)
 				gpio_pin_set(gpio_dev2, BUS_GRANT_PIN, 0);
 
 				k_mutex_unlock(&fsm_ctx.mutex);
-				#ifdef REPLACE_IDLE_WITH_TRISTATE
-				configure_pins_as_tristate();
-				#else
+			
 				configure_pins_as_idle();
-				#endif
+	
 				k_mutex_lock(&fsm_ctx.mutex, K_FOREVER);
 
 				fsm_ctx.state = FSM_IDLE_NOT_OWNER;
 				current_owner = SPI_BUS_OWNER_OTHER_MCU;
+
+				CS_MIRROR_ON_BECOME_NOT_OWNER();
 			} else {
 				LOG_ERR("Failed to tristate bus during release");
 				fsm_ctx.state = FSM_ERROR;
@@ -705,6 +572,9 @@ static int fsm_process_event(enum bus_fsm_event event)
 
 				fsm_ctx.state = FSM_IDLE_OWNER;
 				current_owner = SPI_BUS_OWNER_THIS_MCU;
+
+				CS_MIRROR_ON_BECOME_OWNER();
+
 			} else {
 				LOG_ERR("Failed to reclaim bus");
 				fsm_ctx.state = FSM_ERROR;
@@ -797,6 +667,8 @@ static int fsm_process_event(enum bus_fsm_event event)
 
 				fsm_ctx.state = FSM_IDLE_OWNER;
 				current_owner = SPI_BUS_OWNER_THIS_MCU;
+
+				CS_MIRROR_ON_BECOME_OWNER();
 				if (response_time < BUS_QUICK_GRANT_TIMEOUT_MS) {
 					LOG_INF("Other MCU responded quickly (%lld ms) - available",
 					        response_time);
@@ -830,6 +702,8 @@ static int fsm_process_event(enum bus_fsm_event event)
 
 					fsm_ctx.state = FSM_IDLE_OWNER;
 					current_owner = SPI_BUS_OWNER_THIS_MCU;
+
+					CS_MIRROR_ON_BECOME_OWNER();
 					LOG_INF("SPI bus claimed successfully");
 				} else {
 					fsm_ctx.state = FSM_ERROR;
@@ -870,6 +744,8 @@ static int fsm_process_event(enum bus_fsm_event event)
 			gpio_pin_set(gpio_dev2, BUS_REQUEST_PIN, 0);
 			fsm_ctx.state = FSM_IDLE_NOT_OWNER;
 			current_owner = SPI_BUS_OWNER_OTHER_MCU;
+
+			CS_MIRROR_ON_BECOME_NOT_OWNER();
 		}
 		break;
 
@@ -889,6 +765,8 @@ static int fsm_process_event(enum bus_fsm_event event)
 				if (ret == 0) {
 					fsm_ctx.state = FSM_IDLE_OWNER;
 					current_owner = SPI_BUS_OWNER_THIS_MCU;
+
+					CS_MIRROR_ON_BECOME_OWNER();
 				}
 			} else {
 				k_mutex_unlock(&fsm_ctx.mutex);
@@ -897,6 +775,8 @@ static int fsm_process_event(enum bus_fsm_event event)
 
 				fsm_ctx.state = FSM_IDLE_NOT_OWNER;
 				current_owner = SPI_BUS_OWNER_OTHER_MCU;
+
+				CS_MIRROR_ON_BECOME_NOT_OWNER();
 			}
 		}
 		break;
@@ -948,20 +828,39 @@ static void fsm_thread(void *arg1, void *arg2, void *arg3)
 	}
 }
 
+#ifdef THIS_IS_BOOTLOADER
+K_THREAD_STACK_DEFINE(fsm_thread_stack, 2048);
+static struct k_thread fsm_thread_data;
+static k_tid_t fsm_thread_id;
+#else
 K_THREAD_DEFINE(fsm_thread_id, 2048, fsm_thread, NULL, NULL, NULL, 5, 0, 0);
+#endif
 
-static void spi_bus_share_init_work_handler(struct k_work *work)
+int spi_bus_share_init(void)
 {
 	int ret;
 
-	ARG_UNUSED(work);
+	#ifdef THIS_IS_NRF9151
+		LOG_INF("nRF9151 build - using SPI bus (delayed for sync)");
+		k_sleep(K_MSEC(BOOT_DELAY_MS));
+	#else
+		LOG_INF("nRF5340 build - using QSPI bus");
+	#endif
+
+
+	k_mutex_init(&fsm_ctx.mutex);
+	k_sem_init(&fsm_ctx.event_sem, 0, 1);
+	k_work_init_delayable(&fsm_ctx.timeout_work, fsm_timeout_handler);
+	k_work_init_delayable(&fsm_ctx.deferred_grant_work, deferred_grant_handler);
+
+	k_mutex_init(&bus_mutex);
 
 	LOG_INF("Initializing SPI bus sharing module");
 
 	gpio_dev2 = DEVICE_DT_GET(DT_NODELABEL(gpio0));
 	if (!device_is_ready(gpio_dev2)) {
 		LOG_ERR("GPIO device not ready");
-		return;
+		return -ENODEV;
 	}
 
 	#ifndef THIS_IS_NRF5340
@@ -973,8 +872,7 @@ static void spi_bus_share_init_work_handler(struct k_work *work)
 
 	flash_dev = DEVICE_DT_GET(DT_NODELABEL(flash_ext));
 	if (!device_is_ready(flash_dev)) {
-		LOG_WRN("Flash device not ready - will skip power management in MCUboot");
-		flash_dev = NULL;  
+		LOG_WRN("Flash device not ready - attempting to initialize...");
 	} else {
 		LOG_INF("Flash device ready");
 	}
@@ -995,27 +893,46 @@ static void spi_bus_share_init_work_handler(struct k_work *work)
 	ret = gpio_add_callback(gpio_dev2, &grant_cb_data);
 	if (ret < 0) {
 		LOG_ERR("Failed to add GRANT callback: %d", ret);
-		return;
+		return ret;
 	}
 
 	ret = gpio_add_callback(gpio_dev2, &request_cb_data);
 	if (ret < 0) {
 		LOG_ERR("Failed to add REQUEST callback: %d", ret);
-		return;
+		return ret;
 	}
+
+	#if defined(ENABLE_CS_MIRROR) && !defined(THIS_IS_NRF5340)
+
+	gpio_init_callback(&cs_mirror_cb_data, cs_mirror_isr, BIT(CS_MIRROR_NRF5340_SOURCE_PIN));
+	ret = gpio_add_callback(gpio_dev2, &cs_mirror_cb_data);
+	if (ret < 0) {
+		LOG_ERR("Failed to add CS_MIRROR callback: %d", ret);
+		return ret;
+	}
+	LOG_INF("CS mirror callback registered for P0.%d (nRF5340 source)",
+	        CS_MIRROR_NRF5340_SOURCE_PIN);
+	#endif
 
 	LOG_INF("Starting in STARTUP state - configuring SPI pins");
 
 	spi_bus_tristate();
 
-	#ifdef REPLACE_IDLE_WITH_TRISTATE
-	configure_pins_as_tristate();
-	#else
 	configure_pins_as_idle();
-	#endif
 
 
 	current_owner = SPI_BUS_OWNER_NONE;
+
+#ifdef THIS_IS_BOOTLOADER
+	/* Manually create and start FSM thread for bootloader */
+	LOG_INF("Creating FSM thread manually for bootloader...");
+	fsm_thread_id = k_thread_create(&fsm_thread_data, fsm_thread_stack,
+	                                K_THREAD_STACK_SIZEOF(fsm_thread_stack),
+	                                fsm_thread, NULL, NULL, NULL,
+	                                5, 0, K_NO_WAIT);
+	k_thread_name_set(fsm_thread_id, "fsm_thread");
+	LOG_INF("FSM thread created with tid %p", fsm_thread_id);
+#endif
 
 	fsm_initialized = true;
 
@@ -1036,28 +953,12 @@ static void spi_bus_share_init_work_handler(struct k_work *work)
 
 	k_sleep(K_MSEC(100));
 	fsm_post_event(EVENT_STARTUP_DISCOVERY);
-}
-
-int spi_bus_share_init(void)
-{
-	k_mutex_init(&fsm_ctx.mutex);
-	k_sem_init(&fsm_ctx.event_sem, 0, 1);
-	k_work_init_delayable(&fsm_ctx.timeout_work, fsm_timeout_handler);
-	k_work_init_delayable(&fsm_ctx.deferred_grant_work, deferred_grant_handler);
-
-	k_mutex_init(&bus_mutex);
-
-	k_work_init_delayable(&init_work, spi_bus_share_init_work_handler);
-
-	k_work_schedule(&init_work, K_NO_WAIT);
-
-	LOG_INF("SPI bus sharing module will initialize.");
 
 	return 0;
 }
 
 #ifndef THIS_IS_BOOTLOADER
-SYS_INIT(spi_bus_share_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+SYS_INIT(spi_bus_share_init, POST_KERNEL, CONFIG_APPLICATION_INIT_PRIORITY);
 #endif
 /**
  * @brief Request bus ownership via FSM
@@ -1109,11 +1010,9 @@ int spi_bus_shutdown(void)
 		return 0;
 	}
 
-	/* Stop the FSM thread by aborting it */
 	k_thread_abort(fsm_thread_id);
 	LOG_INF("  FSM thread aborted");
 
-	/* Remove GPIO interrupt callbacks */
 	int ret = gpio_remove_callback(gpio_dev2, &grant_cb_data);
 	if (ret < 0) {
 		LOG_WRN("Failed to remove GRANT callback: %d", ret);
@@ -1125,14 +1024,11 @@ int spi_bus_shutdown(void)
 	}
 	LOG_INF("  GPIO callbacks removed");
 
-	/* Disable interrupts on both pins */
 	gpio_pin_interrupt_configure(gpio_dev2, BUS_REQUEST_PIN, GPIO_INT_DISABLE);
 	gpio_pin_interrupt_configure(gpio_dev2, BUS_GRANT_PIN, GPIO_INT_DISABLE);
 	LOG_INF("  GPIO interrupts disabled");
 
-	/* Reset both pins to INPUT (tristate) to release hardware control */
 	#if defined(THIS_IS_NRF5340) && !defined(THIS_IS_BOOTLOADER)
-	/* Use direct register writes for nRF5340 application */
 	NRF_GPIO_Type *gpio = NRF_P0_NS;
 	gpio->PIN_CNF[BUS_REQUEST_PIN] = 0;
 	gpio->OUT &= ~(1U << BUS_REQUEST_PIN);
@@ -1146,12 +1042,10 @@ int spi_bus_shutdown(void)
 	LOG_INF("  Pins P0.%d and P0.%d reset via Zephyr API", BUS_REQUEST_PIN, BUS_GRANT_PIN);
 	#endif
 
-	/* Cancel any pending work items */
 	k_work_cancel_delayable(&fsm_ctx.timeout_work);
 	k_work_cancel_delayable(&fsm_ctx.deferred_grant_work);
 	LOG_INF("  Pending work items cancelled");
 
-	/* Mark as uninitialized */
 	fsm_initialized = false;
 
 	LOG_INF("SPI bus share shutdown complete - HW resources released");
@@ -1318,666 +1212,115 @@ int spi_bus_release_transaction(void)
 	return 0;
 }
 
-
 /*
 ======================================================================================
 ======================================================================================
 ======================================================================================
 ======================================================================================
-PIN & DEVICE CONFIGURATION
+ACCESSOR FUNCTIONS FOR SHELL
 ======================================================================================
 ======================================================================================
 ======================================================================================
 */
 
-static int configure_pin_output(uint32_t pin)
+const struct device *spi_bus_get_gpio_dev(void)
 {
-	int ret;
-
-	nrf_gpio_cfg_default(pin);
-
-	ret = gpio_pin_configure(gpio_dev2, pin,  GPIO_OUTPUT | GPIO_ACTIVE_LOW);
-	if (ret < 0) {
-		LOG_ERR("Failed to configure pin %d as output: %d", pin, ret);
-		return ret;
-	}
-
-	LOG_DBG("Pin %d configured as output", pin);
-	return 0;
+	return gpio_dev2;
 }
 
-static int configure_cs_output(void)
+const struct device *spi_bus_get_spi_dev(void)
 {
-	int ret;
-
-	ret = configure_pin_output(SPI_CS_PIN);
-	if (ret < 0) return ret;
-	ret = configure_pin_output(SPI_CS1_PIN);
-	if (ret < 0) return ret;
-	ret = configure_pin_output(SPI_CS2_PIN);
-	if (ret < 0) return ret;
-
-	return 0;
+#ifndef THIS_IS_NRF5340
+	return spi_dev;
+#else
+	return NULL;
+#endif
 }
 
-/**
- * @brief Configure a pin as high-impedance input (tristate)
- */
-static int configure_pin_tristate(uint32_t pin)
+const char *spi_bus_get_type(void)
 {
-	int ret;
-
-	nrf_gpio_cfg_default(pin);
-
-	ret = gpio_pin_configure(gpio_dev2, pin, GPIO_INPUT | GPIO_PULL_DOWN);
-	if (ret < 0) {
-		LOG_ERR("Failed to configure pin %d as tristate: %d", pin, ret);
-		return ret;
-	}
-
-	LOG_DBG("Pin %d configured as tristate", pin);
-	return 0;
+	return SPI_BUS_TYPE;
 }
 
-/**
- * @brief Configure all pins as(tristate)
- */
-static int configure_pins_as_tristate(void)
+uint8_t spi_bus_get_sck_pin(void)
 {
-	int ret;
-
-	ret = configure_pin_tristate(SPI_SCK_PIN);
-	if (ret < 0) return ret;
-
-	ret = configure_pin_tristate(SPI_MOSI_PIN);
-	if (ret < 0) return ret;
-
-	ret = configure_pin_tristate(SPI_MISO_PIN);
-	if (ret < 0) return ret;
-
-	ret = configure_cs_tristate();
-	if (ret < 0) return ret;
-
-	return 0;
+	return SPI_SCK_PIN;
 }
 
-/**
- * @brief Configure CS pins as high-impedance to prevent bus conflicts
- */
-static int configure_cs_tristate(void)
+uint8_t spi_bus_get_mosi_pin(void)
 {
-	int ret;
-
-	gpio_pin_set(gpio_dev2, SPI_CS_PIN, 1);
-	gpio_pin_set(gpio_dev2, SPI_CS1_PIN, 1);
-	gpio_pin_set(gpio_dev2, SPI_CS2_PIN, 1);
-
-	k_msleep(1); 
-
-	ret = configure_pin_tristate(SPI_CS_PIN);
-	if (ret < 0) return ret;
-
-	ret = configure_pin_tristate(SPI_CS1_PIN);
-	if (ret < 0) return ret;
-
-	ret = configure_pin_tristate(SPI_CS2_PIN);
-	if (ret < 0) return ret;
-
-	return 0;
+	return SPI_MOSI_PIN;
 }
 
-int spi_bus_tristate(void)
+uint8_t spi_bus_get_miso_pin(void)
 {
-	int ret;
-
-	k_mutex_lock(&bus_mutex, K_FOREVER);
-
-	if (current_owner == SPI_BUS_OWNER_NONE) {
-		LOG_WRN("%s bus already tristated", SPI_BUS_TYPE);
-		k_mutex_unlock(&bus_mutex);
-		return 0;
-	}
-	LOG_INF("Tristating %s bus pins", SPI_BUS_TYPE);
-
-	#ifndef THIS_IS_BOOTLOADER
-	if (flash_dev && device_is_ready(flash_dev)) {
-		LOG_INF("Suspending flash device to release pins...");
-		ret = pm_device_action_run(flash_dev, PM_DEVICE_ACTION_SUSPEND);
-		if (ret < 0) {
-			LOG_ERR("Failed to suspend flash device: %d", ret);
-		}
-		LOG_INF("Flash device suspended, peripheral disabled");
-		k_msleep(10);
-	} else {
-		LOG_INF("Flash device not available - configuring pins directly (MCUboot mode)");
-	}
-
-	#endif
-	ret = configure_pins_as_tristate();
-	if (ret < 0) {
-		LOG_ERR("Failed to configure pins as tristate");
-		k_mutex_unlock(&bus_mutex);
-	}
-
-	current_owner = SPI_BUS_OWNER_NONE;
-	LOG_INF("%s bus successfully tristated", SPI_BUS_TYPE);
-
-	k_mutex_unlock(&bus_mutex);
-	return 0;
+	return SPI_MISO_PIN;
 }
 
-int spi_bus_reclaim(void)
+uint8_t spi_bus_get_cs_pin(void)
 {
-	int ret;
-
-	k_mutex_lock(&bus_mutex, K_FOREVER);
-
-	if (current_owner == SPI_BUS_OWNER_THIS_MCU) {
-		LOG_WRN("%s bus already owned by this MCU", SPI_BUS_TYPE);
-		k_mutex_unlock(&bus_mutex);
-		return 0;
-	}
-
-	LOG_INF("Reclaiming %s bus pins", SPI_BUS_TYPE);
-
-	#ifndef THIS_IS_BOOTLOADER
-	if (flash_dev && device_is_ready(flash_dev)) {
-		LOG_INF("Resuming flash device to reclaim pins...");
-		ret = pm_device_action_run(flash_dev, PM_DEVICE_ACTION_RESUME);
-		if (ret < 0) {
-			LOG_ERR("Failed to resume flash device: %d", ret);
-		}
-		LOG_INF("Flash device resumed, peripheral re-enabled and reinitialized");
-		k_msleep(10);
-	} else {
-		LOG_INF("Flash device not available - configuring pins directly (MCUboot mode)");
-		/* Continue without flash PM - just configure pins */
-	}
-
-	#endif
-	LOG_INF("Manually reconfiguring CS pins");
-	ret = configure_cs_output();
-	if (ret < 0) {
-		LOG_ERR("Failed to configure CS pins");
-		k_mutex_unlock(&bus_mutex);
-	}
-	ret = gpio_pin_set(gpio_dev2, SPI_CS_PIN, 0);
-	ret = gpio_pin_set(gpio_dev2, SPI_CS1_PIN, 0);
-	ret = gpio_pin_set(gpio_dev2, SPI_CS2_PIN, 0);
-	if (ret < 0) {
-		LOG_ERR("Failed to set CS pins: %d", ret);
-		k_mutex_unlock(&bus_mutex);
-	}
-
-	LOG_INF("CS pins configured as outputs (high)");
-
-	current_owner = SPI_BUS_OWNER_THIS_MCU;
-	LOG_INF("%s bus successfully reclaimed", SPI_BUS_TYPE);
-
-	k_mutex_unlock(&bus_mutex);
-	return 0;
+	return SPI_CS_PIN;
 }
 
-
-
-/*
-======================================================================================
-======================================================================================
-======================================================================================
-======================================================================================
-COMMANDS
-======================================================================================
-======================================================================================
-======================================================================================
-*/
-
-#ifdef SPI_BUS_SHARE_SHELL
-static int cmd_spi_tristate(const struct shell *sh, size_t argc, char **argv)
+uint8_t spi_bus_get_cs1_pin(void)
 {
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-
-	shell_print(sh, "Tristating SPI bus...");
-
-	int ret = spi_bus_tristate();
-	if (ret == 0) {
-		shell_print(sh, "SUCCESS: SPI bus pins are now in high-impedance state");
-		shell_print(sh, "The other MCU can now safely access the external memory");
-	} else {
-		shell_error(sh, "FAILED: Could not tristate SPI bus (error %d)", ret);
-	}
-
-	return ret;
+	return SPI_CS1_PIN;
 }
 
-static int cmd_spi_reclaim(const struct shell *sh, size_t argc, char **argv)
+uint8_t spi_bus_get_cs2_pin(void)
 {
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-
-	shell_print(sh, "Reclaiming SPI bus...");
-
-	int ret = spi_bus_reclaim();
-	if (ret == 0) {
-		shell_print(sh, "SUCCESS: SPI bus reclaimed");
-		shell_print(sh, "This MCU can now access the external memory");
-	} else {
-		shell_error(sh, "FAILED: Could not reclaim SPI bus (error %d)", ret);
-	}
-
-	return ret;
+	return SPI_CS2_PIN;
 }
 
-static int cmd_spi_owner(const struct shell *sh, size_t argc, char **argv)
+uint8_t spi_bus_get_bus_request_pin(void)
 {
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-
-	enum spi_bus_owner owner = spi_bus_get_owner();
-
-	shell_print(sh, "Current SPI bus owner:");
-
-	switch (owner) {
-	case SPI_BUS_OWNER_THIS_MCU:
-		shell_print(sh, "  THIS_MCU - This microprocessor owns the bus");
-		shell_print(sh, "  SPI operations are enabled");
-		break;
-	case SPI_BUS_OWNER_OTHER_MCU:
-		shell_print(sh, "  OTHER_MCU - Other microprocessor owns the bus");
-		shell_print(sh, "  SPI operations should not be performed");
-		break;
-	case SPI_BUS_OWNER_NONE:
-		shell_print(sh, "  NONE - Bus is tristated (high-impedance)");
-		shell_print(sh, "  No MCU currently owns the bus");
-		break;
-	default:
-		shell_error(sh, "  UNKNOWN - Invalid owner state");
-		break;
-	}
-
-	return 0;
+	return BUS_REQUEST_PIN;
 }
 
-static int cmd_spi_status(const struct shell *sh, size_t argc, char **argv)
+uint8_t spi_bus_get_bus_grant_pin(void)
 {
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-
-	shell_print(sh, "SPI Bus Sharing Status");
-	shell_print(sh, "======================");
-	shell_print(sh, "");
-
-
-	shell_print(sh, "Pin Configuration:");
-	shell_print(sh, "  SCK  (Clock):      P0.%d", SPI_SCK_PIN);
-	shell_print(sh, "  MOSI (Master Out): P0.%d", SPI_MOSI_PIN);
-	shell_print(sh, "  MISO (Master In):  P0.%d", SPI_MISO_PIN);
-	shell_print(sh, "  CS0  (Flash):      P0.%d", SPI_CS_PIN);
-	shell_print(sh, "  CS1:               P0.%d", SPI_CS1_PIN);
-	shell_print(sh, "  CS2:               P0.%d", SPI_CS2_PIN);
-	shell_print(sh, "");
-
-
-	enum spi_bus_owner owner = spi_bus_get_owner();
-	shell_print(sh, "Current Bus Owner:");
-
-	switch (owner) {
-	case SPI_BUS_OWNER_THIS_MCU:
-		shell_print(sh, "  THIS_MCU (SPI enabled)");
-		break;
-	case SPI_BUS_OWNER_OTHER_MCU:
-		shell_print(sh, "  OTHER_MCU (SPI disabled)");
-		break;
-	case SPI_BUS_OWNER_NONE:
-		shell_print(sh, "  NONE (Bus tristated)");
-		break;
-	default:
-		shell_print(sh, "  UNKNOWN");
-		break;
-	}
-
-	return 0;
+	return BUS_GRANT_PIN;
 }
 
-static int cmd_spi_test_pins(const struct shell *sh, size_t argc, char **argv)
+const char *spi_bus_fsm_state_to_string(int state)
 {
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-
-	shell_print(sh, "Testing SPI Pin States");
-	shell_print(sh, "======================");
-	shell_print(sh, "");
-
-	shell_print(sh, "Pin Configurations:");
-
-
-	NRF_GPIO_Type *gpio_port = NRF_P0_NS;
-
-
-	uint32_t sck_cnf = gpio_port->PIN_CNF[SPI_SCK_PIN];
-	shell_print(sh, "  SCK  (P0.%d): CNF=0x%08X", SPI_SCK_PIN, sck_cnf);
-	shell_print(sh, "    DIR=%s, INPUT=%s, PULL=%s, DRIVE=%s, SENSE=%s",
-		(sck_cnf & GPIO_PIN_CNF_DIR_Msk) ? "Output" : "Input",
-		(sck_cnf & GPIO_PIN_CNF_INPUT_Msk) ? "Disconnected" : "Connected",
-		((sck_cnf & GPIO_PIN_CNF_PULL_Msk) >> GPIO_PIN_CNF_PULL_Pos) == 0 ? "Disabled" :
-		((sck_cnf & GPIO_PIN_CNF_PULL_Msk) >> GPIO_PIN_CNF_PULL_Pos) == 1 ? "Pulldown" : "Pullup",
-		((sck_cnf & GPIO_PIN_CNF_DRIVE_Msk) >> GPIO_PIN_CNF_DRIVE_Pos) == 0 ? "S0S1" : "Other",
-		((sck_cnf & GPIO_PIN_CNF_SENSE_Msk) >> GPIO_PIN_CNF_SENSE_Pos) == 0 ? "Disabled" : "Enabled");
-
-
-	uint32_t mosi_cnf = gpio_port->PIN_CNF[SPI_MOSI_PIN];
-	shell_print(sh, "  MOSI (P0.%d): CNF=0x%08X", SPI_MOSI_PIN, mosi_cnf);
-	shell_print(sh, "    DIR=%s, INPUT=%s, PULL=%s",
-		(mosi_cnf & GPIO_PIN_CNF_DIR_Msk) ? "Output" : "Input",
-		(mosi_cnf & GPIO_PIN_CNF_INPUT_Msk) ? "Disconnected" : "Connected",
-		((mosi_cnf & GPIO_PIN_CNF_PULL_Msk) >> GPIO_PIN_CNF_PULL_Pos) == 0 ? "Disabled" :
-		((mosi_cnf & GPIO_PIN_CNF_PULL_Msk) >> GPIO_PIN_CNF_PULL_Pos) == 1 ? "Pulldown" : "Pullup");
-
-
-	uint32_t miso_cnf = gpio_port->PIN_CNF[SPI_MISO_PIN];
-	shell_print(sh, "  MISO (P0.%d): CNF=0x%08X", SPI_MISO_PIN, miso_cnf);
-	shell_print(sh, "    DIR=%s, INPUT=%s, PULL=%s",
-		(miso_cnf & GPIO_PIN_CNF_DIR_Msk) ? "Output" : "Input",
-		(miso_cnf & GPIO_PIN_CNF_INPUT_Msk) ? "Disconnected" : "Connected",
-		((miso_cnf & GPIO_PIN_CNF_PULL_Msk) >> GPIO_PIN_CNF_PULL_Pos) == 0 ? "Disabled" :
-		((miso_cnf & GPIO_PIN_CNF_PULL_Msk) >> GPIO_PIN_CNF_PULL_Pos) == 1 ? "Pulldown" : "Pullup");
-
-	uint32_t cs_cnf = gpio_port->PIN_CNF[SPI_CS_PIN];
-	shell_print(sh, "  CS0  (P0.%d): CNF=0x%08X", SPI_CS_PIN, cs_cnf);
-	shell_print(sh, "    DIR=%s, INPUT=%s, PULL=%s",
-		(cs_cnf & GPIO_PIN_CNF_DIR_Msk) ? "Output" : "Input",
-		(cs_cnf & GPIO_PIN_CNF_INPUT_Msk) ? "Disconnected" : "Connected",
-		((cs_cnf & GPIO_PIN_CNF_PULL_Msk) >> GPIO_PIN_CNF_PULL_Pos) == 0 ? "Disabled" :
-		((cs_cnf & GPIO_PIN_CNF_PULL_Msk) >> GPIO_PIN_CNF_PULL_Pos) == 1 ? "Pulldown" : "Pullup");
-
-	shell_print(sh, "");
-	shell_print(sh, "Tristate Check:");
-	shell_print(sh, "  A tristated pin should show: DIR=Input, PULL=Pulldown (or Disabled)");
-	shell_print(sh, "  An active pin shows: Connected to peripheral or DIR=Output");
-
-	return 0;
+	return fsm_state_to_string((enum bus_fsm_state)state);
 }
 
-static int cmd_bus_request(const struct shell *sh, size_t argc, char **argv)
+void spi_bus_get_transaction_state(bool *other_mcu_detected, bool *transaction_in_progress)
 {
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-
-	shell_print(sh, "Requesting bus ownership via FSM...");
-
-	int ret = spi_bus_request();
-	if (ret == 0) {
-		shell_print(sh, "Request posted to FSM");
-		shell_print(sh, "Use 'bus_fsm_status' to check state");
-	} else {
-		shell_error(sh, "Failed to post request: %d", ret);
-	}
-
-	return ret;
-}
-
-static int cmd_bus_release(const struct shell *sh, size_t argc, char **argv)
-{
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-
-	shell_print(sh, "Releasing bus via FSM...");
-
-	int ret = spi_bus_release();
-	if (ret == 0) {
-		shell_print(sh, "Release posted to FSM");
-		shell_print(sh, "Use 'bus_fsm_status' to check state");
-	} else {
-		shell_error(sh, "Failed to post release: %d", ret);
-	}
-
-	return ret;
-}
-
-static int cmd_bus_fsm_status(const struct shell *sh, size_t argc, char **argv)
-{
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-
-	uint32_t errors, transitions;
-
-	shell_print(sh, "SPI Bus FSM Status");
-	shell_print(sh, "==================");
-	shell_print(sh, "");
-
-	int state = spi_bus_get_fsm_state();
-	shell_print(sh, "Current FSM State: %s", fsm_state_to_string((enum bus_fsm_state)state));
-	shell_print(sh, "");
-
-	bool req_state = gpio_pin_get(gpio_dev2, BUS_REQUEST_PIN);
-	bool grant_state = gpio_pin_get(gpio_dev2, BUS_GRANT_PIN);
-
-	shell_print(sh, "GPIO Pin States:");
-	shell_print(sh, "  BUS_REQUEST (P0.%d): %s", BUS_REQUEST_PIN, req_state ? "HIGH" : "LOW");
-	shell_print(sh, "  BUS_GRANT   (P0.%d): %s", BUS_GRANT_PIN, grant_state ? "HIGH" : "LOW");
-	shell_print(sh, "");
-
 	k_mutex_lock(&fsm_ctx.mutex, K_FOREVER);
-	bool other_detected = fsm_ctx.other_mcu_detected;
-	bool in_transaction = fsm_ctx.transaction_in_progress;
+	if (other_mcu_detected) {
+		*other_mcu_detected = fsm_ctx.other_mcu_detected;
+	}
+	if (transaction_in_progress) {
+		*transaction_in_progress = fsm_ctx.transaction_in_progress;
+	}
 	k_mutex_unlock(&fsm_ctx.mutex);
-
-	shell_print(sh, "Bus Status:");
-	shell_print(sh, "  Other MCU detected:   %s", other_detected ? "YES" : "NO");
-	shell_print(sh, "  Transaction lock:     %s", in_transaction ? "YES (holding indefinitely)" : "NO");
-	if (in_transaction && grant_state) {
-		shell_print(sh, "  GRANT line:           HIGH (other MCU waiting)");
-		shell_print(sh, "  Status:               Holding bus, will release on bus_release_transaction");
-	} else if (in_transaction) {
-		shell_print(sh, "  GRANT line:           LOW (no MCU waiting)");
-		shell_print(sh, "  Status:               Transaction lock active, no contention");
-	} else if (grant_state) {
-		shell_print(sh, "  GRANT line:           HIGH (WARNING: unexpected state)");
-	}
-	shell_print(sh, "");
-
-	spi_bus_get_fsm_stats(&errors, &transitions);
-	shell_print(sh, "Statistics:");
-	shell_print(sh, "  Total transitions: %u", transitions);
-	shell_print(sh, "  Error count:       %u", errors);
-	shell_print(sh, "");
-
-	shell_print(sh, "FSM State Descriptions:");
-	shell_print(sh, "  STARTUP:        Auto-discovering bus ownership");
-	shell_print(sh, "  IDLE_OWNER:     This MCU owns the bus");
-	shell_print(sh, "  IDLE_NOT_OWNER: Other MCU owns the bus");
-	shell_print(sh, "  REQUESTING:     Waiting for grant from other MCU");
-	shell_print(sh, "  RELEASING:      Releasing bus to other MCU");
-	shell_print(sh, "  ERROR:          Protocol error - use 'bus_recover'");
-
-	return 0;
 }
 
-static int cmd_bus_recover(const struct shell *sh, size_t argc, char **argv)
+int spi_bus_simulate_grant_event(int value)
 {
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-
-	shell_print(sh, "Initiating FSM error recovery...");
-
-	int ret = spi_bus_error_recovery();
-	if (ret == 0) {
-		shell_print(sh, "Recovery posted to FSM");
-		shell_print(sh, "Use 'bus_fsm_status' to check result");
-	} else {
-		shell_error(sh, "Failed to post recovery: %d", ret);
-	}
-
-	return ret;
-}
-
-static int cmd_bus_simulate_grant(const struct shell *sh, size_t argc, char **argv)
-{
-	ARG_UNUSED(argc);
-
-	if (argc != 2) {
-		shell_error(sh, "Usage: bus_simulate_grant <0|1>");
-		shell_print(sh, "  0 = Other MCU denies/revokes access (GRANT_LOST)");
-		shell_print(sh, "  1 = Other MCU grants access (GRANT_RECEIVED)");
-		return -EINVAL;
-	}
-
-	int value = atoi(argv[1]);
-	if (value != 0 && value != 1) {
-		shell_error(sh, "Invalid value. Use 0 or 1");
-		return -EINVAL;
-	}
-
-	shell_print(sh, "");
-	shell_print(sh, "=== SINGLE MCU TEST MODE ===");
-	shell_print(sh, "Simulating other MCU %s bus grant...",
-	            value ? "GRANTING" : "DENYING/REVOKING");
-	shell_print(sh, "");
-
 	int ret;
 	if (value) {
 		ret = fsm_post_event(EVENT_GRANT_RECEIVED);
-		shell_print(sh, "Posted EVENT_GRANT_RECEIVED to FSM");
+		LOG_INF("Posted EVENT_GRANT_RECEIVED to FSM");
 	} else {
 		ret = fsm_post_event(EVENT_GRANT_LOST);
-		shell_print(sh, "Posted EVENT_GRANT_LOST to FSM");
+		LOG_INF("Posted EVENT_GRANT_LOST to FSM");
 	}
-
-	if (ret == 0) {
-		shell_print(sh, "Event posted successfully");
-		shell_print(sh, "Use 'bus_fsm_status' to verify state transition");
-	} else {
-		shell_error(sh, "Failed to post event: %d", ret);
-	}
-
-	shell_print(sh, "");
-
 	return ret;
 }
 
-static int cmd_bus_simulate_request(const struct shell *sh, size_t argc, char **argv)
+int spi_bus_simulate_request_event(int value)
 {
-	ARG_UNUSED(argc);
-
-	if (argc != 2) {
-		shell_error(sh, "Usage: bus_simulate_request <0|1>");
-		shell_print(sh, "  0 = Other MCU released its request (REQUEST_RELEASED)");
-		shell_print(sh, "  1 = Other MCU is requesting the bus (REQUEST_RECEIVED)");
-		return -EINVAL;
-	}
-
-	int value = atoi(argv[1]);
-	if (value != 0 && value != 1) {
-		shell_error(sh, "Invalid value. Use 0 or 1");
-		return -EINVAL;
-	}
-
-	shell_print(sh, "");
-	shell_print(sh, "=== SINGLE MCU TEST MODE ===");
-	shell_print(sh, "Simulating other MCU %s bus request...",
-	            value ? "REQUESTING" : "RELEASING REQUEST");
-	shell_print(sh, "");
-
 	int ret;
 	if (value) {
 		ret = fsm_post_event(EVENT_REQUEST_RECEIVED);
-		shell_print(sh, "Posted EVENT_REQUEST_RECEIVED to FSM");
+		LOG_INF("Posted EVENT_REQUEST_RECEIVED to FSM");
 	} else {
 		ret = fsm_post_event(EVENT_REQUEST_RELEASED);
-		shell_print(sh, "Posted EVENT_REQUEST_RELEASED to FSM");
+		LOG_INF("Posted EVENT_REQUEST_RELEASED to FSM");
 	}
-
-	if (ret == 0) {
-		shell_print(sh, "Event posted successfully");
-		shell_print(sh, "Use 'bus_fsm_status' to verify state transition");
-	} else {
-		shell_error(sh, "Failed to post event: %d", ret);
-	}
-
-	shell_print(sh, "");
-
 	return ret;
 }
-
-static int cmd_bus_acquire(const struct shell *sh, size_t argc, char **argv)
-{
-	ARG_UNUSED(argc);
-
-	if (argc != 2) {
-		shell_error(sh, "Usage: bus_acquire <quick|lock>");
-		shell_print(sh, "  quick = Acquire bus, yield immediately on request (no transaction lock)");
-		shell_print(sh, "  lock  = Acquire bus with transaction lock (hold indefinitely)");
-		return -EINVAL;
-	}
-
-	bool use_transaction_lock;
-
-	if (strcmp(argv[1], "quick") == 0) {
-		use_transaction_lock = false;
-		shell_print(sh, "Acquiring bus in QUICK mode (will yield immediately)...");
-	} else if (strcmp(argv[1], "lock") == 0) {
-		use_transaction_lock = true;
-		shell_print(sh, "Acquiring bus with TRANSACTION LOCK (will hold indefinitely)...");
-	} else {
-		shell_error(sh, "Invalid mode. Use 'quick' or 'lock'");
-		return -EINVAL;
-	}
-
-	shell_print(sh, "");
-	shell_print(sh, "This command will block until bus is acquired...");
-	shell_print(sh, "");
-
-	int ret = spi_bus_acquire_blocking(use_transaction_lock);
-
-	if (ret == 0) {
-		shell_print(sh, "SUCCESS: Bus acquired");
-		if (use_transaction_lock) {
-			shell_print(sh, "Transaction lock active - bus will NOT yield to other MCU");
-			shell_print(sh, "Use 'bus_release_transaction' to release the lock and handover");
-		} else {
-			shell_print(sh, "Quick mode - bus will yield immediately if other MCU requests");
-		}
-	} else {
-		shell_error(sh, "FAILED: Could not acquire bus (error %d)", ret);
-	}
-
-	return ret;
-}
-
-static int cmd_bus_release_transaction(const struct shell *sh, size_t argc, char **argv)
-{
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-
-	shell_print(sh, "Releasing transaction lock...");
-
-	int ret = spi_bus_release_transaction();
-
-	if (ret == 0) {
-		shell_print(sh, "SUCCESS: Transaction lock released");
-		shell_print(sh, "If other MCU was waiting, handover is now complete");
-		shell_print(sh, "Use 'bus_fsm_status' to check current state");
-	} else {
-		shell_error(sh, "FAILED: Could not release transaction (error %d)", ret);
-	}
-
-	return ret;
-}
-
-SHELL_CMD_REGISTER(spi_tristate, NULL, "Release SPI bus (tristate pins)", cmd_spi_tristate);
-SHELL_CMD_REGISTER(spi_reclaim, NULL, "Reclaim SPI bus for this MCU", cmd_spi_reclaim);
-SHELL_CMD_REGISTER(spi_owner, NULL, "Show current SPI bus owner", cmd_spi_owner);
-SHELL_CMD_REGISTER(spi_status, NULL, "Show SPI bus sharing status", cmd_spi_status);
-SHELL_CMD_REGISTER(spi_test_pins, NULL, "Test and show actual pin states", cmd_spi_test_pins);
-
-SHELL_CMD_REGISTER(bus_request, NULL, "Request bus ownership (FSM)", cmd_bus_request);
-SHELL_CMD_REGISTER(bus_release, NULL, "Release bus ownership (FSM)", cmd_bus_release);
-SHELL_CMD_REGISTER(bus_acquire, NULL, "Acquire bus (blocking) - quick or lock mode", cmd_bus_acquire);
-SHELL_CMD_REGISTER(bus_release_transaction, NULL, "Release transaction lock and complete handover", cmd_bus_release_transaction);
-SHELL_CMD_REGISTER(bus_fsm_status, NULL, "Show FSM status and statistics", cmd_bus_fsm_status);
-SHELL_CMD_REGISTER(bus_recover, NULL, "Recover from FSM error state", cmd_bus_recover);
-SHELL_CMD_REGISTER(bus_simulate_grant, NULL, "TEST: Simulate other MCU grant signal", cmd_bus_simulate_grant);
-SHELL_CMD_REGISTER(bus_simulate_request, NULL, "TEST: Simulate other MCU request signal", cmd_bus_simulate_request);
-
-
-#endif

@@ -14,17 +14,19 @@ if(CONFIG_SPI_BUS_SHARE)
     message(STATUS "=== Adding SPI bus share module (Application) ===")
   endif()
 
-  # Both bootloader and application need spi_bus_share.c
   zephyr_library_sources(${MODULE_ROOT}/spi_bus_share.c)
+  zephyr_library_sources(${MODULE_ROOT}/spi_bus_pin_config.c)
+
+
+  if(CONFIG_SPI_BUS_SHARE_SHELL)
+    zephyr_library_sources(${MODULE_ROOT}/spi_bus_share_shell.c)
+    zephyr_compile_definitions(SPI_BUS_SHARE_SHELL)
+  endif()
 
   message(STATUS "=== SPI bus share module added successfully ===")
 
   if(CONFIG_SPI_BUS_SHARE_BOOTLOADER)
     zephyr_compile_definitions(THIS_IS_BOOTLOADER)
-  endif()
-
-  if(CONFIG_SPI_BUS_SHARE_SHELL)
-    zephyr_compile_definitions(SPI_BUS_SHARE_SHELL)
   endif()
 
   if(CONFIG_SPI_BUS_SHARE_NRF5340)

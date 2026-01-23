@@ -1,0 +1,53 @@
+&regulators {
+    status = "disabled";
+};
+
+&power {
+    status = "disabled";
+};
+
+
+&i2c2 {
+	status = "disabled";
+	clock-frequency = <I2C_BITRATE_STANDARD>;
+    zephyr,concat-buf-size = <64>;
+    zephyr,flash-buf-max-size = <64>;
+};
+
+&pmic_main {
+	status = "disabled";
+
+	npm1300_gpios {
+		status = "disabled";
+	};
+	regulators {
+		status = "disabled";
+	};
+	charger {
+		status = "disabled";
+	};
+};
+
+&flash_ext {
+    status = "disabled";
+};
+
+&spi3 {
+	status = "disabled";
+};
+
+&bmp {
+	status = "disabled";
+};
+
+&mag0 {
+	status = "disabled";
+};
+
+&imu {
+	status = "disabled";
+};
+
+&uart1 {
+	status = "disabled";
+};

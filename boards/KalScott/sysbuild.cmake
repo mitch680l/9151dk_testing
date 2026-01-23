@@ -6,9 +6,6 @@
 #
 
 if(SB_CONFIG_BOARD_KESTREL_NRF9151_NS)
-  # Use static partition layout to ensure the partition layout remains
-  # unchanged after DFU. This needs to be made globally available
-  # because it is used in other CMake files.
   if(SB_CONFIG_KESTREL_STATIC_PARTITIONS_FACTORY)
     set(PM_STATIC_YML_FILE ${CMAKE_CURRENT_LIST_DIR}/kestrel_nrf9151_pm_static.yml CACHE INTERNAL "")
   endif()
@@ -24,13 +21,23 @@ if(SB_CONFIG_BOARD_KESTREL_NRF5340_CPUAPP OR SB_CONFIG_BOARD_KESTREL_NRF5340_CPU
 endif()
 
 
-# Add SPI bus share module for application (if enabled via Kconfig)
-# Note: This is always added to make Kconfig options available
-# The actual compilation is controlled by CONFIG_SPI_BUS_SHARE in the module's CMakeLists.txt
+
 set(${DEFAULT_IMAGE}_EXTRA_ZEPHYR_MODULES ${CMAKE_CURRENT_LIST_DIR}/spi_bus_share CACHE INTERNAL "")
 
 if(SB_CONFIG_BOOTLOADER_MCUBOOT)
-  # Always add module to MCUboot for image access hooks
   set(mcuboot_EXTRA_ZEPHYR_MODULES ${CMAKE_CURRENT_LIST_DIR}/spi_bus_share CACHE INTERNAL "")
-  set(mcuboot_OVERLAY_CONFIG ${CMAKE_CURRENT_LIST_DIR}/sysbuild/mcuboot.conf CACHE INTERNAL "")
+
+  set(mcuboot_OVERLAY_CONFIG ${CMAKE_CURRENT_LIST_DIR}/sysbuild/mcuboot.conf)
+  set(mcuboot_DTC_OVERLAY_FILE ${CMAKE_CURRENT_LIST_DIR}/sysbuild/mcuboot.overlay)
+
+  if(SB_CONFIG_BOARD_KESTREL_NRF9151_NS)
+    list(APPEND mcuboot_DTC_OVERLAY_FILE ${CMAKE_CURRENT_LIST_DIR}/sysbuild/mcuboot_nrf9151.overlay)
+    list(APPEND mcuboot_OVERLAY_CONFIG ${CMAKE_CURRENT_LIST_DIR}/sysbuild/mcuboot_nrf9151.conf)
+  elseif(SB_CONFIG_BOARD_KESTREL_NRF5340_CPUAPP_NS OR SB_CONFIG_BOARD_KESTREL_NRF5340_CPUAPP)
+    list(APPEND mcuboot_DTC_OVERLAY_FILE ${CMAKE_CURRENT_LIST_DIR}/sysbuild/mcuboot_nrf5340.overlay)
+    list(APPEND mcuboot_OVERLAY_CONFIG ${CMAKE_CURRENT_LIST_DIR}/sysbuild/mcuboot_nrf5340.conf)
+  endif()
+
+  set(mcuboot_OVERLAY_CONFIG ${mcuboot_OVERLAY_CONFIG} CACHE INTERNAL "")
+  set(mcuboot_DTC_OVERLAY_FILE ${mcuboot_DTC_OVERLAY_FILE} CACHE INTERNAL "")
 endif()

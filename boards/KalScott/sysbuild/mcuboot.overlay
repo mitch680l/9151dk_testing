@@ -1,0 +1,9 @@
+/*
+ * Copyright (c) 2024 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+ */
+
+/* Generic MCUboot device tree overlay for all Kestrel boards */
+
+/* Add common MCUboot device tree configurations here that apply to all board variants */

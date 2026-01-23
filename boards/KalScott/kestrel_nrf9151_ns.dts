@@ -24,7 +24,6 @@
 	};
 };
 
-/* UART1 completely removed for GNSS I2C implementation */
 
 &power {
 	status = "okay";

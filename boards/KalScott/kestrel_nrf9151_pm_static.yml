@@ -124,17 +124,17 @@ settings_storage:
 mcuboot_secondary_5340:
   address: 0x4D2000
   device: DT_CHOSEN(nordic_pm_ext_flash)
-  end_address: 0x5b2000
+  end_address: 0x5BE000
   placement:
     align:
       start: 0x4
   region: external_flash
   share_size:
   - mcuboot_primary
-  size: 0xe0000
+  size: 0xec000
 mcuboot_secondary_5340_1:
-  address: 0x5b2000
+  address: 0x5be000
   device: DT_CHOSEN(nordic_pm_ext_flash)
-  end_address: 0x5f2000
+  end_address: 0x5fe000
   region: external_flash
   size: 0x40000

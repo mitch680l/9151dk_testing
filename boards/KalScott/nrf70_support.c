@@ -22,7 +22,7 @@ static const struct gpio_dt_spec ldsw_rf_fe_sr_en = {
 	.dt_flags = GPIO_ACTIVE_LOW | GPIO_OPEN_DRAIN | GPIO_PULL_UP,
 };
 
-/* Enable the regulator and set the GPIO pin to enable the RF frontend */
+
 int nrf_wifi_if_zep_start_board(const struct device *dev)
 {
 	ARG_UNUSED(dev);
@@ -45,13 +45,11 @@ int nrf_wifi_if_zep_start_board(const struct device *dev)
 		return ret;
 	}
 
-	/* Wait for the load switch to settle on operating voltage. */
 	k_sleep(K_USEC(300));
 
 	return 0;
 }
 
-/* Disable the regulator and set the GPIO pin to disable the RF frontend */
 int nrf_wifi_if_zep_stop_board(const struct device *dev)
 {
 	ARG_UNUSED(dev);
@@ -65,11 +63,6 @@ int nrf_wifi_if_zep_stop_board(const struct device *dev)
 		return ret;
 	}
 
-	/*
-	 * If the REGULATOR_BOOT_ON flag is set, turn off the regulator once more. This is needed
-	 * once after boot, since the initial enabling caused by the flag counts as a
-	 * reference-counted request, on par with invoking regulator_enable().
-	 */
 	if (wifi_regulator_config->flags & REGULATOR_BOOT_ON && !boot_power_disabled) {
 		ret = regulator_disable(wifi_regulator);
 		boot_power_disabled = true;

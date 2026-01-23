@@ -1,7 +1,3 @@
-/*
- * Copyright (c) 2024 Nordic Semiconductor
- * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
- */
 
 #include "kestrel_nrf9151_common-pinctrl.dtsi"
 #include "kestrel_common.dtsi"
@@ -41,6 +37,24 @@
 	// 	jedec-id = [c8 60 19];
 	// };
 
+	// flash_ext: gd25wb256e3ir@0 {
+	// 	compatible = "jedec,spi-nor";
+	// 	status = "disabled";
+	// 	reg = <0>;
+	// 	spi-max-frequency = <8000000>;
+	// 	size = <268435456>;
+	// 	has-dpd;
+	// 	t-enter-dpd = <3000>;
+	// 	t-exit-dpd = <40000>;
+	// 	sfdp-bfp = [
+	// 		e5 20 f3 ff  ff ff ff 0f  44 eb 08 6b  08 3b 42 bb
+	// 		ee ff ff ff  ff ff 00 ff  ff ff 00 ff  0c 20 0f 52
+	// 		10 d8 00 ff  44 7a c9 fe  83 67 26 62  ec 82 18 44
+	// 		7a 75 7a 75  04 c4 d5 5c  00 06 74 00  08 50 00 01
+	// 		];
+	// 	jedec-id = [c8 65 19];
+	// };
+
 	flash_ext: gd25wb256e3ir@0 {
 		compatible = "jedec,spi-nor";
 		status = "disabled";
@@ -53,18 +67,17 @@
 		sfdp-bfp = [
 			e5 20 f3 ff  ff ff ff 0f  44 eb 08 6b  08 3b 42 bb
 			ee ff ff ff  ff ff 00 ff  ff ff 00 ff  0c 20 0f 52
-			10 d8 00 ff  44 7a c9 fe  83 67 26 62  ec 82 18 44
-			7a 75 7a 75  04 c4 d5 5c  00 06 74 00  08 50 00 01
+			10 d8 00 ff  d6 39 a5 fe  83 1f 15 51  ec 62 16 33
+			7a 75 7a 75  04 bd d5 5c  00 06 64 00  08 50 00 01
 			];
-		jedec-id = [c8 65 19];
+		jedec-id = [c8 40 19];
 	};
-
 	
-	imu: icm42688@2 {
+	imu: icm42688@1 {
         compatible = "invensense,icm42688";
-        reg = <2>;                       
+        reg = <1>;                       
         spi-max-frequency = <8000000>;
-        status = "disabled";
+        status = "okay";
         int-gpios = <&gpio0 26 GPIO_ACTIVE_HIGH>;
 		vin-supply = <&ldsw_sensors>;
 
@@ -77,23 +90,36 @@
     };
 
 };
+
 / {
 	model = "Kalscott Kestrel nRF9151";
 	compatible = "Kalscott,kestrel-nrf9151";
 
-	//  i2c_bb0: i2c {
-    //     compatible = "gpio-i2c";
-    //     status = "okay";
-    //     scl-gpios = <&gpio0 9 (GPIO_OPEN_DRAIN | GPIO_PULL_UP)>;
-    //     sda-gpios = <&gpio0 8 (GPIO_OPEN_DRAIN | GPIO_PULL_UP)>;
-    //     clock-frequency = <I2C_BITRATE_STANDARD>;
-    //     label = "I2C_BB0";
 
-    //     #address-cells = <1>;
-    //     #size-cells = <0>;
-    // };
+	sram0_ns@2007fc00 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x2007fc00 DT_SIZE_K(1)>;
+		zephyr,memory-region = "RetainedMem";
+		status = "okay";
+
+		retainedmem {
+			compatible = "zephyr,retained-ram";
+			status = "okay";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			boot_mode0: boot_mode@0 {
+				compatible = "zephyr,retention";
+				status = "okay";
+				reg = <0x0 0x100>;
+				prefix = [08 04];
+				checksum = <1>;
+			};
+		};
+	};
 
 	chosen {
+		zephyr,boot-mode = &boot_mode0;
 		zephyr,console = &uart0;
 		zephyr,shell-uart = &uart0;
 		zephyr,uart-mcumgr = &uart1;
@@ -103,7 +129,7 @@
 	buttons {
 		compatible = "gpio-keys";
 		ipc1: button_0 {
-			gpios = <&gpio0 16 (GPIO_ACTIVE_HIGH)>;
+			gpios = <&gpio0 16 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
 		};
 	};
 
@@ -126,19 +152,10 @@
 
 &gpio0 {
 	status = "okay";
-	/* Use PORT event rather than GPIOTE IN event, to save power */
 	sense-edge-mask = <0xffffffff>;
-	/* Load switch controlling 3.3V supply and I/O voltage for external boards */
-	/* Disabled for standalone nRF9151 - re-enable if you have expansion connectors that need power switching
-	exp_board_enable: exp_board_enable {
-		gpio-hog;
-		output-low;
-		gpios = <3 GPIO_ACTIVE_HIGH>;
-	};
-	*/
 };
 
-/* PWM0 disabled - RGB LEDs not present on standalone design */
+
 &pwm0 {
 	status = "disabled";
 };
@@ -159,16 +176,11 @@
 };
 &spi3 {
 	status = "okay";
-	cs-gpios = 
-		<&gpio0 0 GPIO_ACTIVE_LOW>, 
-		<&gpio0 27 GPIO_ACTIVE_LOW>,  
+	cs-gpios =
+		<&gpio0 0 GPIO_ACTIVE_LOW>,  
+		<&gpio0 27 GPIO_ACTIVE_LOW>,
 		<&gpio0 15 GPIO_ACTIVE_LOW>;
 
-	//old
-	// cs-gpios = 
-	// 	<&gpio0 10 GPIO_ACTIVE_LOW>, 
-	// 	<&gpio0 14 GPIO_ACTIVE_LOW>,  
-	// 	<&gpio0 7 GPIO_ACTIVE_LOW>;
 };
 
 &pmic_main {
